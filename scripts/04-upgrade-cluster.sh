@@ -221,10 +221,29 @@ elif [[ -n "$CONDITIONAL" ]]; then
         echo "$RISKS" | while IFS= read -r line; do log_warn "  $line"; done
     fi
 else
-    log_error "No ${TARGET_MINOR}.x versions found in available or conditional updates."
-    log_error "Available updates:"
-    oc adm upgrade 2>&1 | head -30
-    exit 1
+    # No versions in cluster's available/conditional updates.
+    # Fall back to querying Red Hat's update graph API directly and using --to-image.
+    log_warn "No ${TARGET_MINOR}.x versions found in cluster's available/conditional updates."
+    log_warn "Querying Red Hat update graph API for candidate-${TARGET_MINOR}..."
+
+    GRAPH_JSON=$(curl -sS "https://api.openshift.com/api/upgrades_info/v1/graph?channel=candidate-${TARGET_MINOR}&arch=amd64" 2>/dev/null || echo "{}")
+
+    # Find the latest version in the graph that starts with TARGET_MINOR
+    TARGET_VERSION=$(echo "$GRAPH_JSON" | jq -r --arg prefix "${TARGET_MINOR}." \
+        '[.nodes[] | select(.version | startswith($prefix))] | sort_by(.version) | last | .version // ""' 2>/dev/null || echo "")
+    TARGET_IMAGE=$(echo "$GRAPH_JSON" | jq -r --arg v "$TARGET_VERSION" \
+        '.nodes[] | select(.version==$v) | .payload // ""' 2>/dev/null || echo "")
+
+    if [[ -z "$TARGET_VERSION" || -z "$TARGET_IMAGE" ]]; then
+        log_error "No ${TARGET_MINOR}.x versions found in Red Hat update graph either."
+        log_error "Channel candidate-${TARGET_MINOR} may not have any releases yet."
+        exit 1
+    fi
+
+    USE_TO_IMAGE=true
+    log_warn "Found ${TARGET_VERSION} in update graph (no direct edge from current version)."
+    log_warn "Will use --to-image with --allow-explicit-upgrade to force the upgrade."
+    log_warn "Release image: ${TARGET_IMAGE}"
 fi
 
 if [[ "$UPGRADEABLE" != "True" ]]; then
@@ -235,9 +254,15 @@ fi
 # 7. Trigger upgrade
 # -----------------------------------------------
 log_info "Triggering upgrade to ${TARGET_VERSION}..."
-UPGRADE_CMD="oc adm upgrade --to=${TARGET_VERSION}"
-[[ -n "$USE_NOT_RECOMMENDED" ]] && UPGRADE_CMD+=" $USE_NOT_RECOMMENDED"
-[[ -n "$FORCE_FLAG" ]] && UPGRADE_CMD+=" $FORCE_FLAG"
+
+if [[ "${USE_TO_IMAGE:-false}" == "true" ]]; then
+    UPGRADE_CMD="oc adm upgrade --to-image=${TARGET_IMAGE} --allow-explicit-upgrade --force"
+    log_warn "Using --to-image with --allow-explicit-upgrade (no graph edge from current version)."
+else
+    UPGRADE_CMD="oc adm upgrade --to=${TARGET_VERSION}"
+    [[ -n "$USE_NOT_RECOMMENDED" ]] && UPGRADE_CMD+=" $USE_NOT_RECOMMENDED"
+    [[ -n "$FORCE_FLAG" ]] && UPGRADE_CMD+=" $FORCE_FLAG"
+fi
 
 log_info "Running: $UPGRADE_CMD"
 eval "$UPGRADE_CMD"
