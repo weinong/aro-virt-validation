@@ -2,3 +2,4 @@
 .pull-secret.txt
 global-pull-secret.json
 *.tmp
+.upgrade-snapshots/
