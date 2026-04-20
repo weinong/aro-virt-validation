@@ -1,0 +1,4 @@
+.env
+.pull-secret.txt
+global-pull-secret.json
+*.tmp
