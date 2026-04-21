@@ -164,3 +164,7 @@ oc patch CatalogSource cnv-nightly-catalog-source -n openshift-marketplace \
 | `CNV_VERSION` | `4.99` | CNV nightly version to install |
 | `QUAY_USERNAME` | (from `.env`) | quay.io username with openshift-cnv org access |
 | `QUAY_PASSWORD` | (from `.env`) | quay.io encrypted password |
+
+## References
+
+- [Installing pre-release versions of OpenShift Virtualization (CNV)](https://access.redhat.com/articles/6070641) — Red Hat KB article covering the nightly CNV installation workflow (requires Red Hat login)
