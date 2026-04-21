@@ -3,3 +3,4 @@
 global-pull-secret.json
 *.tmp
 .upgrade-snapshots/
+docs/6070641.md
