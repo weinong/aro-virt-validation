@@ -16,8 +16,6 @@ End-to-end automation for deploying an Azure Red Hat OpenShift (ARO) cluster, in
 .env                          # Quay.io credentials (gitignored)
 .pull-secret.txt              # Red Hat pull secret (gitignored)
 .upgrade-snapshots/           # Pre/post upgrade ClusterVersion snapshots (gitignored)
-docs/
-  6070641.md                  # Red Hat KB 6070641 - Installing pre-release CNV
 issues/
   2026-04-21.md               # Bug: virt-handler cert mount + QEMU machine type mismatch
 scripts/
