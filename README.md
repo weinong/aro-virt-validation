@@ -18,6 +18,8 @@ End-to-end automation for deploying an Azure Red Hat OpenShift (ARO) cluster, in
 .upgrade-snapshots/           # Pre/post upgrade ClusterVersion snapshots (gitignored)
 docs/
   6070641.md                  # Red Hat KB 6070641 - Installing pre-release CNV
+issues/
+  2026-04-21.md               # Bug: virt-handler cert mount + QEMU machine type mismatch
 scripts/
   env.sh                      # Shared environment variables and helper functions
   00-prereqs.sh               # Phase 0: Validate Azure prerequisites
@@ -25,6 +27,7 @@ scripts/
   02-cnv-pull-secret.sh       # Phase 2: Add quay.io/openshift-cnv pull secret
   03-cnv-install.sh           # Phase 3: Install CNV nightly operator
   04-upgrade-cluster.sh       # Phase 4: Upgrade OCP one minor version at a time
+  05-cnv-validation-checkup.sh # Phase 5: Run CNV validation checkup
 ```
 
 ## Setup
@@ -132,6 +135,31 @@ Final state:
 - **HyperConverged**: Available
 - **All nodes**: Ready
 - **All ClusterOperators**: Available, not Degraded
+
+### Phase 5: Run the CNV validation checkup
+
+```bash
+./scripts/05-cnv-validation-checkup.sh
+```
+
+Runs the [ocp-virt-validation-checkup](https://github.com/openshift-cnv/ocp-virt-validation-checkup) tool against the cluster. The script:
+
+1. Extracts the checkup container image from the installed CNV CSV's `relatedImages`
+2. Logs in to quay.io and generates the validation resources (namespace, ServiceAccount, RBAC, PVC, Job)
+3. Applies the resources and waits for the Job to complete
+4. Deploys an nginx results viewer with an OpenShift Route
+
+Configure test scope with environment variables:
+
+```bash
+TEST_SUITES=compute,network,storage  # default
+STORAGE_CLASS=managed-csi            # default (Azure Disk RWO)
+DRY_RUN=true                        # generate manifests without applying
+```
+
+Artifacts are saved to `.checkup-runs/<timestamp>/`.
+
+**Known issue (CNV 4.99.0-2739):** The checkup cannot complete due to two bugs in this nightly build — see [issues/2026-04-21.md](issues/2026-04-21.md).
 
 ## Caveats
 
