@@ -157,7 +157,14 @@ DRY_RUN=true                        # generate manifests without applying
 
 Artifacts are saved to `.checkup-runs/<timestamp>/`.
 
-**Known issue (CNV 4.99.0-2739):** The checkup cannot complete due to two bugs in this nightly build — see [issues/2026-04-21.md](issues/2026-04-21.md).
+**Known issue (CNV 4.99.0-2739):** The virt-launcher container's QEMU does not support the default `pc-q35-rhel9.8.0` machine type. Before running the checkup, override it:
+
+```bash
+oc annotate --overwrite hyperconverged kubevirt-hyperconverged -n openshift-cnv \
+  'kubevirt.kubevirt.io/jsonpatch=[{"op":"add","path":"/spec/configuration","value":{"architectureConfiguration":{"amd64":{"machineType":"pc-q35-rhel9.6.0"}}}}]'
+```
+
+See [issues/2026-04-21.md](issues/2026-04-21.md) for full details and test results.
 
 ## Caveats
 
