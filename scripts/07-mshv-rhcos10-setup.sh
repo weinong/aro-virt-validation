@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Phase 8 — Set up MSHV (hyperv-direct) node with RHCOS 10
+# Phase 7 — Set up MSHV (hyperv-direct) node with RHCOS 10
 #
 # This script:
 #   1. Enables TechPreviewNoUpgrade featureset (IRREVERSIBLE)
@@ -25,7 +25,7 @@ MSHV_VM_SIZE="${MSHV_VM_SIZE:-Standard_D192ds_v6}"
 MSHV_DISK_SIZE_GB="${MSHV_DISK_SIZE_GB:-256}"
 MSHV_ZONE="${MSHV_ZONE:-1}"
 
-log_info "=== Phase 8: MSHV Node Setup with RHCOS 10 ==="
+log_info "=== Phase 7: MSHV Node Setup with RHCOS 10 ==="
 
 check_command oc || exit 1
 check_command jq || exit 1
@@ -217,4 +217,4 @@ log_info "  MCP:        mshv (rhel-10)"
 log_info "  L1VH:       $(if [[ "${L1VH}" -gt 0 ]]; then echo "Yes"; else echo "No"; fi)"
 log_info "============================================"
 
-log_ok "Phase 8 complete."
+log_ok "Phase 7 complete."
