@@ -5,8 +5,11 @@
 # Applies the kubevirt jsonpatch annotation to enable:
 #   - ConfigurableHypervisor + hyperv-direct hypervisor
 #   - Required feature gates
-#   - qemu64-v1 CPU model
 #   - evictionStrategy: None
+#
+# NOTE: Do NOT set cpuModel (e.g. qemu64-v1) — it causes a nodeSelector
+# mismatch because virt-handler does not advertise virtual CPU model labels.
+# See issues/2026-04-23.md for details.
 # =============================================================================
 set -euo pipefail
 
@@ -42,21 +45,6 @@ JSONPATCH='[
     "op": "add",
     "path": "/spec/configuration/evictionStrategy",
     "value": "None"
-  },
-  {
-    "op": "replace",
-    "path": "/spec/configuration/obsoleteCPUModels/qemu64",
-    "value": false
-  },
-  {
-    "op": "replace",
-    "path": "/spec/configuration/obsoleteCPUModels/qemu64-v1",
-    "value": false
-  },
-  {
-    "op": "add",
-    "path": "/spec/configuration/cpuModel",
-    "value": "qemu64-v1"
   }
 ]'
 
@@ -83,7 +71,7 @@ except (KeyError, IndexError):
 if [[ "${HAS_HV_FIELD}" == "false" ]]; then
   log_warn "KubeVirt CRD does NOT have hypervisors field."
   log_warn "The hyperv-direct setting in the jsonpatch will be silently ignored."
-  log_warn "Other settings (feature gates, cpuModel, evictionStrategy) are still applied."
+  log_warn "Other settings (feature gates, evictionStrategy) are still applied."
 else
   # Wait for KubeVirt to reconcile the hypervisors array
   log_info "Waiting for KubeVirt to reconcile (up to 5 min)..."
@@ -134,10 +122,5 @@ oc get kubevirt kubevirt-kubevirt-hyperconverged -n openshift-cnv \
 log_info "KubeVirt hypervisors:"
 oc get kubevirt kubevirt-kubevirt-hyperconverged -n openshift-cnv \
   -o jsonpath='{.spec.configuration.hypervisors}' 2>/dev/null | jq '.' 2>/dev/null || true
-
-log_info "KubeVirt CPU model:"
-oc get kubevirt kubevirt-kubevirt-hyperconverged -n openshift-cnv \
-  -o jsonpath='{.spec.configuration.cpuModel}' 2>/dev/null
-echo
 
 log_ok "Phase 8 complete. MSHV configuration applied."
