@@ -221,7 +221,7 @@ MSHV_ZONE=1                      # default
 ./scripts/08-mshv-hco-patch.sh
 ```
 
-Annotates the HyperConverged CR with the kubevirt jsonpatch to enable `ConfigurableHypervisor`, set `hypervisorConfiguration.name=hyperv-direct`, configure `qemu64-v1` CPU model, and related feature gates. Only run this after the node is confirmed to be in L1VH mode (Phase 7).
+Annotates the HyperConverged CR with the kubevirt jsonpatch to enable `ConfigurableHypervisor`, set `hypervisors=[{name: hyperv-direct}]`, configure `qemu64-v1` CPU model, and related feature gates. Only run this after the node is confirmed to be in L1VH mode (Phase 7).
 
 After Phase 8 completes, run Phase 5 to run validation.
 
