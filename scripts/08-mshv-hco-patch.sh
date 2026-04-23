@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Phase 7 — Patch HCO for MSHV (hyperv-direct) support
+# Phase 8 — Patch HCO for MSHV (hyperv-direct) support
 #
 # Applies the kubevirt jsonpatch annotation to enable:
 #   - ConfigurableHypervisor + hyperv-direct hypervisor
@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 
-log_info "=== Phase 7: Patch HCO for MSHV ==="
+log_info "=== Phase 8: Patch HCO for MSHV ==="
 
 check_command oc || exit 1
 
@@ -112,4 +112,4 @@ oc get kubevirt kubevirt-kubevirt-hyperconverged -n openshift-cnv \
   -o jsonpath='{.spec.configuration.cpuModel}' 2>/dev/null
 echo
 
-log_ok "Phase 7 complete. MSHV configuration applied."
+log_ok "Phase 8 complete. MSHV configuration applied."

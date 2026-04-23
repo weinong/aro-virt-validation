@@ -28,8 +28,8 @@ scripts/
   04-upgrade-cluster.sh       # Phase 4: Upgrade OCP one minor version at a time
   05-cnv-validation-checkup.sh # Phase 5: Run CNV validation checkup
   06-mshv-machineset.sh       # Phase 6: Create D192ds_v6 machineset for MSHV
-  07-mshv-hco-patch.sh        # Phase 7: Patch HCO for hyperv-direct
-  08-mshv-rhcos10-setup.sh    # Phase 8: MSHV node with RHCOS 10 + L1VH partition
+  07-mshv-rhcos10-setup.sh    # Phase 7: MSHV node with RHCOS 10 + L1VH partition
+  08-mshv-hco-patch.sh        # Phase 8: Patch HCO for hyperv-direct
 ```
 
 ## Setup
@@ -187,20 +187,12 @@ These phases set up an MSHV node running RHCOS 10.2 with L1VH partition support 
 
 Creates a `Standard_D192ds_v6` machineset with the Azure tag `platformsettings.host_environment.nodefeatures.hierarchicalvirtualizationv1=True`. This tag requests placement on an L1VH-capable host.
 
-> **Note:** With RHCOS 9.8 (kernel 5.14), the node will NOT boot in L1VH mode — the kernel lacks MSHV patches. Use Phase 8 instead.
+> **Note:** With RHCOS 9.8 (kernel 5.14), the node will NOT boot in L1VH mode — the kernel lacks MSHV patches. Use Phase 7 instead.
 
-#### Phase 7: Patch HCO for hyperv-direct
-
-```bash
-./scripts/07-mshv-hco-patch.sh
-```
-
-Annotates the HyperConverged CR with the kubevirt jsonpatch to enable `ConfigurableHypervisor`, set `hypervisorConfiguration.name=hyperv-direct`, configure `qemu64-v1` CPU model, and related feature gates. Only run this after the node is confirmed to be in L1VH mode.
-
-#### Phase 8: MSHV node with RHCOS 10 + L1VH (recommended)
+#### Phase 7: MSHV node with RHCOS 10 + L1VH (recommended)
 
 ```bash
-./scripts/08-mshv-rhcos10-setup.sh
+./scripts/07-mshv-rhcos10-setup.sh
 ```
 
 This is the recommended approach. The script:
@@ -223,7 +215,15 @@ MSHV_DISK_SIZE_GB=256            # default
 MSHV_ZONE=1                      # default
 ```
 
-After Phase 8 completes, run Phase 7 to patch the HCO, then Phase 5 to run validation.
+#### Phase 8: Patch HCO for hyperv-direct
+
+```bash
+./scripts/08-mshv-hco-patch.sh
+```
+
+Annotates the HyperConverged CR with the kubevirt jsonpatch to enable `ConfigurableHypervisor`, set `hypervisorConfiguration.name=hyperv-direct`, configure `qemu64-v1` CPU model, and related feature gates. Only run this after the node is confirmed to be in L1VH mode (Phase 7).
+
+After Phase 8 completes, run Phase 5 to run validation.
 
 See [issues/2026-04-22.md](issues/2026-04-22.md) for the full investigation and kernel upgrade process.
 
@@ -233,7 +233,7 @@ See [issues/2026-04-22.md](issues/2026-04-22.md) for the full investigation and 
 - **No rollback.** There is no supported rollback path from a failed minor upgrade.
 - **CNV nightly is unsupported by Red Hat.** Pre-release CNV cannot be upgraded to a GA version and must not be used in production.
 - **Update graph lag.** When a new OCP version (e.g. `4.22.0-rc.0`) appears in the graph after the script has already selected an older version (e.g. `4.22.0-ec.5`), simply re-run `oc adm upgrade --to=<newer>` to pick it up. The `candidate-X.Y` channel polls the graph automatically.
-- **TechPreviewNoUpgrade is irreversible.** Phase 8 (MSHV/RHCOS 10) enables TechPreviewNoUpgrade, permanently preventing minor version upgrades. Only use on clusters you are willing to tear down.
+- **TechPreviewNoUpgrade is irreversible.** Phase 7 (MSHV/RHCOS 10) enables TechPreviewNoUpgrade, permanently preventing minor version upgrades. Only use on clusters you are willing to tear down.
 
 ## CNV Upgrades
 
