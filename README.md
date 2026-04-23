@@ -18,6 +18,7 @@ End-to-end automation for deploying an Azure Red Hat OpenShift (ARO) cluster, in
 .upgrade-snapshots/           # Pre/post upgrade ClusterVersion snapshots (gitignored)
 issues/
   2026-04-21.md               # Bug: virt-handler cert mount + QEMU machine type mismatch
+  2026-04-22.md               # MSHV L1VH: RHCOS 9.8 kernel lacks support, resolved with RHCOS 10.2
 scripts/
   env.sh                      # Shared environment variables and helper functions
   00-prereqs.sh               # Phase 0: Validate Azure prerequisites
@@ -26,6 +27,9 @@ scripts/
   03-cnv-install.sh           # Phase 3: Install CNV nightly operator
   04-upgrade-cluster.sh       # Phase 4: Upgrade OCP one minor version at a time
   05-cnv-validation-checkup.sh # Phase 5: Run CNV validation checkup
+  06-mshv-machineset.sh       # Phase 6: Create D192ds_v6 machineset for MSHV
+  07-mshv-hco-patch.sh        # Phase 7: Patch HCO for hyperv-direct
+  08-mshv-rhcos10-setup.sh    # Phase 8: MSHV node with RHCOS 10 + L1VH partition
 ```
 
 ## Setup
@@ -166,12 +170,70 @@ oc annotate --overwrite hyperconverged kubevirt-hyperconverged -n openshift-cnv 
 
 See [issues/2026-04-21.md](issues/2026-04-21.md) for full details and test results.
 
+### Phase 6-8: MSHV (hyperv-direct) validation with RHCOS 10
+
+These phases set up an MSHV node running RHCOS 10.2 with L1VH partition support for testing KubeVirt with the `hyperv-direct` hypervisor.
+
+#### Prerequisites
+
+- Azure quota for `Standard_D192ds_v6` (192 vCPUs in the Ddsv6 family + sufficient total regional vCPUs)
+- OCP 4.21+ payload containing the `rhel-coreos-10` image
+
+#### Phase 6: Create MSHV machineset (RHCOS 9.8 — for initial testing only)
+
+```bash
+./scripts/06-mshv-machineset.sh
+```
+
+Creates a `Standard_D192ds_v6` machineset with the Azure tag `platformsettings.host_environment.nodefeatures.hierarchicalvirtualizationv1=True`. This tag requests placement on an L1VH-capable host.
+
+> **Note:** With RHCOS 9.8 (kernel 5.14), the node will NOT boot in L1VH mode — the kernel lacks MSHV patches. Use Phase 8 instead.
+
+#### Phase 7: Patch HCO for hyperv-direct
+
+```bash
+./scripts/07-mshv-hco-patch.sh
+```
+
+Annotates the HyperConverged CR with the kubevirt jsonpatch to enable `ConfigurableHypervisor`, set `hypervisorConfiguration.name=hyperv-direct`, configure `qemu64-v1` CPU model, and related feature gates. Only run this after the node is confirmed to be in L1VH mode.
+
+#### Phase 8: MSHV node with RHCOS 10 + L1VH (recommended)
+
+```bash
+./scripts/08-mshv-rhcos10-setup.sh
+```
+
+This is the recommended approach. The script:
+
+1. Enables `TechPreviewNoUpgrade` featureset (**irreversible** — cluster cannot be upgraded afterward)
+2. Waits for the `rhel-10` OS stream to become available via the `OSImageStream` CRD
+3. Creates a dedicated `mshv` MachineConfigPool with `osImageStream.name: rhel-10`
+4. Creates a `Standard_D192ds_v6` machineset with:
+   - `node-role.kubernetes.io/mshv` label (routes node to the mshv MCP)
+   - Azure tag for L1VH host placement
+5. Waits for the node to provision, reboot into RHCOS 10.2 (kernel 6.12), and verify L1VH
+
+The node initially boots with RHCOS 9.8 (from the marketplace image), then the MCO rebases it to RHCOS 10.2. This takes ~10–15 minutes after the VM is provisioned.
+
+Configure with environment variables:
+
+```bash
+MSHV_VM_SIZE=Standard_D192ds_v6  # default
+MSHV_DISK_SIZE_GB=256            # default
+MSHV_ZONE=1                      # default
+```
+
+After Phase 8 completes, run Phase 7 to patch the HCO, then Phase 5 to run validation.
+
+See [issues/2026-04-22.md](issues/2026-04-22.md) for the full investigation and kernel upgrade process.
+
 ## Caveats
 
 - **Unsupported by Microsoft.** Upgrading beyond versions listed in `az aro get-versions` puts the cluster in a Microsoft-unsupported state. The ARO Operator may degrade. This is acceptable for lab/validation clusters only.
 - **No rollback.** There is no supported rollback path from a failed minor upgrade.
 - **CNV nightly is unsupported by Red Hat.** Pre-release CNV cannot be upgraded to a GA version and must not be used in production.
 - **Update graph lag.** When a new OCP version (e.g. `4.22.0-rc.0`) appears in the graph after the script has already selected an older version (e.g. `4.22.0-ec.5`), simply re-run `oc adm upgrade --to=<newer>` to pick it up. The `candidate-X.Y` channel polls the graph automatically.
+- **TechPreviewNoUpgrade is irreversible.** Phase 8 (MSHV/RHCOS 10) enables TechPreviewNoUpgrade, permanently preventing minor version upgrades. Only use on clusters you are willing to tear down.
 
 ## CNV Upgrades
 
@@ -197,7 +259,11 @@ oc patch CatalogSource cnv-nightly-catalog-source -n openshift-marketplace \
 | `CNV_VERSION` | `4.99` | CNV nightly version to install |
 | `QUAY_USERNAME` | (from `.env`) | quay.io username with openshift-cnv org access |
 | `QUAY_PASSWORD` | (from `.env`) | quay.io encrypted password |
+| `MSHV_VM_SIZE` | `Standard_D192ds_v6` | MSHV worker node VM size |
+| `MSHV_DISK_SIZE_GB` | `256` | MSHV worker OS disk size |
+| `MSHV_ZONE` | `1` | Azure availability zone for MSHV node |
 
 ## References
 
 - [Installing pre-release versions of OpenShift Virtualization (CNV)](https://access.redhat.com/articles/6070641) — Red Hat KB article covering the nightly CNV installation workflow (requires Red Hat login)
+- [How to test RHCOS 10 on OpenShift 4.21 and 4.22](https://access.redhat.com/articles/7139678) — Red Hat KB article on enabling RHCOS 10 via OS Streams Tech Preview
