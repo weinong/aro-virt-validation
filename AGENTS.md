@@ -11,5 +11,10 @@ Run the OpenShift Virtualization validation checkup ([openshift-cnv/ocp-virt-val
 - **Idempotent scripts** — safe to re-run.
 - **Numbered script naming**: follows `scripts/0N-...sh` convention.
 - **Verify cluster state** before proceeding — use CLI commands (`oc`, `az`) to confirm the current state of the cluster, CNV installation, and login status. Do not assume.
+- When recreating an ARO cluster for this validation work, disable ARO MachineSet reconciliation after cluster creation so custom MSHV MachineSets are not reverted:
+  ```sh
+  oc patch cluster.aro.openshift.io cluster --type=merge -p '{"spec":{"operatorflags":{"aro.machineset.enabled":"false"}}}'
+  ```
 - Bug reports go under `issues/` directory in `YYYY-MM-DD.md` format, capturing relevant node labels and summarizing the issue.
+- In issue reports, do not describe manual interventions or one-off workarounds as fixes. Call out each manual intervention explicitly, explain why it was needed, and keep the underlying issue open unless the normal declarative/product path works without that intervention.
 - Do NOT work around test validation failures. Your responsibility is to run tests, investigate failures, and document findings.
