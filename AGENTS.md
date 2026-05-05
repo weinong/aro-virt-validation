@@ -16,4 +16,5 @@ Run the OpenShift Virtualization validation checkup ([openshift-cnv/ocp-virt-val
   oc patch cluster.aro.openshift.io cluster --type=merge -p '{"spec":{"operatorflags":{"aro.machineset.enabled":"false"}}}'
   ```
 - Bug reports go under `issues/` directory in `YYYY-MM-DD.md` format, capturing relevant node labels and summarizing the issue.
+- In issue reports, do not describe manual interventions or one-off workarounds as fixes. Call out each manual intervention explicitly, explain why it was needed, and keep the underlying issue open unless the normal declarative/product path works without that intervention.
 - Do NOT work around test validation failures. Your responsibility is to run tests, investigate failures, and document findings.
