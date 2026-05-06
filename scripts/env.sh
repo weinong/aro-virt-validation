@@ -20,6 +20,11 @@ export WORKER_VM_SIZE="${WORKER_VM_SIZE:-Standard_D8s_v5}"
 export WORKER_COUNT="${WORKER_COUNT:-3}"
 export WORKER_DISK_SIZE_GB="${WORKER_DISK_SIZE_GB:-128}"
 
+# Target OCP payload used before enabling TechPreviewNoUpgrade for MSHV/RHCOS 10.
+# 4.22.0-rc.2 and older 4.22 pre-release payloads are blocked by a known
+# TechPreview CR-before-CRD issue in this validation path.
+export TARGET_OCP_VERSION="${TARGET_OCP_VERSION:-}"
+
 # --- Managed Identity names (9 required for managed-identity ARO) ---
 export MI_CLUSTER="aro-cluster"
 export MI_CCM="cloud-controller-manager"
@@ -60,6 +65,35 @@ log_error() { echo -e "\033[0;31m[ERROR]\033[0m $*"; }
 check_command() {
   if ! command -v "$1" &>/dev/null; then
     log_error "Required command '$1' not found. Please install it first."
+    return 1
+  fi
+}
+
+is_known_bad_techpreview_payload() {
+  local version="$1"
+  if [[ "${version}" =~ ^4\.22\.0-(ec|rc)\.([0-9]+)$ ]]; then
+    local pre_release_kind="${BASH_REMATCH[1]}"
+    local pre_release_number="${BASH_REMATCH[2]}"
+    [[ "${pre_release_kind}" == "ec" || "${pre_release_number}" -le 2 ]]
+    return
+  fi
+  return 1
+}
+
+guard_known_bad_techpreview_payload() {
+  local version="$1"
+  local context="${2:-TechPreviewNoUpgrade validation}"
+  local allow="${ALLOW_KNOWN_BAD_TECHPREVIEW_PAYLOAD:-false}"
+
+  if is_known_bad_techpreview_payload "${version}"; then
+    if [[ "${allow}" == "true" ]]; then
+      log_warn "Bypassing known-bad payload guard for ${version}. This is for investigation only."
+      return 0
+    fi
+    log_error "Payload ${version} is blocked for ${context}."
+    log_error "Known issue: 4.22.0-rc.2 and older 4.22 pre-release payloads can fail applying CRIOCredentialProviderConfig before its CRD is served."
+    log_error "Use a newer 4.22 payload before enabling TechPreviewNoUpgrade."
+    log_error "Set ALLOW_KNOWN_BAD_TECHPREVIEW_PAYLOAD=true only to deliberately reproduce/document this issue."
     return 1
   fi
 }

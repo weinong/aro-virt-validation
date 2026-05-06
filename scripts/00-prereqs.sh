@@ -5,7 +5,7 @@
 # Checks:
 #   1. Azure CLI version >= 2.84.0 (required for managed-identity ARO)
 #   2. Required resource providers are registered
-#   3. Sufficient DSv5 quota (52+ cores) in the target region
+#   3. Sufficient DSv5 and Ddsv6 quota in the target region
 #   4. Required CLI extensions
 # =============================================================================
 set -euo pipefail
@@ -17,7 +17,20 @@ echo " Phase 0: Azure Prerequisites Check"
 echo "============================================="
 
 # -----------------------------------------------
-# 1. Check Azure CLI version
+# 1. Check target OCP payload for TechPreview validation
+# -----------------------------------------------
+log_info "Checking target OCP payload guard..."
+if [[ -n "${TARGET_OCP_VERSION}" ]]; then
+    guard_known_bad_techpreview_payload "${TARGET_OCP_VERSION}" "pre-cluster TechPreviewNoUpgrade validation" || exit 1
+    log_ok "  TARGET_OCP_VERSION=${TARGET_OCP_VERSION} is allowed for TechPreview validation"
+else
+    log_warn "  TARGET_OCP_VERSION is not set."
+    log_warn "  Set TARGET_OCP_VERSION to the intended 4.22 payload before creating a cluster for TechPreview/MSHV validation."
+    log_warn "  Known-bad payloads such as 4.22.0-rc.2 will still be blocked later by upgrade and TechPreview scripts."
+fi
+
+# -----------------------------------------------
+# 2. Check Azure CLI version
 # -----------------------------------------------
 log_info "Checking Azure CLI version..."
 check_command az
@@ -41,7 +54,7 @@ else
 fi
 
 # -----------------------------------------------
-# 2. Check logged-in subscription
+# 3. Check logged-in subscription
 # -----------------------------------------------
 log_info "Checking Azure subscription..."
 ACCOUNT_NAME=$(az account show --query name -o tsv 2>/dev/null || echo "")
@@ -52,7 +65,7 @@ fi
 log_ok "Subscription: $ACCOUNT_NAME ($SUBSCRIPTION_ID)"
 
 # -----------------------------------------------
-# 3. Register required resource providers
+# 4. Register required resource providers
 # -----------------------------------------------
 PROVIDERS=(
     "Microsoft.RedHatOpenShift"
@@ -77,7 +90,7 @@ for provider in "${PROVIDERS[@]}"; do
 done
 
 # -----------------------------------------------
-# 4. Check DSv5 quota in target region
+# 5. Check DSv5 quota in target region
 # -----------------------------------------------
 log_info "Checking DSv5 family vCPU quota in $LOCATION..."
 QUOTA_INFO=$(az vm list-usage -l "$LOCATION" \
@@ -102,7 +115,27 @@ else
 fi
 
 # -----------------------------------------------
-# 5. Check for oc / kubectl (informational)
+# 5b. Check Ddsv6 quota for MSHV validation node
+# -----------------------------------------------
+log_info "Checking Ddsv6 family vCPU quota in $LOCATION..."
+MSHV_QUOTA_INFO=$(az vm list-usage -l "$LOCATION" \
+    --query "[?contains(name.value, 'standardDDSv6Family') || contains(name.value, 'standardDdsv6Family')]" -o json 2>/dev/null)
+
+MSHV_CURRENT_USAGE=$(echo "$MSHV_QUOTA_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['currentValue'] if d else 0)" 2>/dev/null || echo "0")
+MSHV_LIMIT=$(echo "$MSHV_QUOTA_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['limit'] if d else 0)" 2>/dev/null || echo "0")
+MSHV_AVAILABLE=$((MSHV_LIMIT - MSHV_CURRENT_USAGE))
+MSHV_REQUIRED_CORES=192
+
+log_info "  Ddsv6 quota: $MSHV_CURRENT_USAGE / $MSHV_LIMIT used, $MSHV_AVAILABLE available"
+if [[ "$MSHV_AVAILABLE" -ge "$MSHV_REQUIRED_CORES" ]]; then
+    log_ok "  Sufficient MSHV quota ($MSHV_AVAILABLE available >= $MSHV_REQUIRED_CORES required)"
+else
+    log_warn "  Insufficient Ddsv6 quota for Standard_D192ds_v6: $MSHV_AVAILABLE available, need $MSHV_REQUIRED_CORES"
+    log_warn "  Request a quota increase for the Ddsv6 family before running MSHV validation."
+fi
+
+# -----------------------------------------------
+# 6. Check for oc / kubectl (informational)
 # -----------------------------------------------
 log_info "Checking for OpenShift CLI tools (optional at this stage)..."
 if command -v oc &>/dev/null; then
@@ -123,7 +156,7 @@ else
 fi
 
 # -----------------------------------------------
-# 6. Check for .pull-secret.txt
+# 7. Check for .pull-secret.txt
 # -----------------------------------------------
 log_info "Checking for Red Hat pull secret..."
 PULL_SECRET_FILE="${SCRIPT_DIR}/../.pull-secret.txt"

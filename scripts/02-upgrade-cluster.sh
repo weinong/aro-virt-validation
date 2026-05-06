@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 04-upgrade-cluster.sh - Upgrade ARO/OCP cluster one minor version at a time
+# 02-upgrade-cluster.sh - Upgrade ARO/OCP cluster one minor version at a time
 #
 # Usage:
-#   ./scripts/04-upgrade-cluster.sh <target-minor>
-#   e.g. ./scripts/04-upgrade-cluster.sh 4.21
-#        ./scripts/04-upgrade-cluster.sh 4.22
+#   ./scripts/02-upgrade-cluster.sh <target-minor>
+#   e.g. ./scripts/02-upgrade-cluster.sh 4.21
+#        ./scripts/02-upgrade-cluster.sh 4.22
 #
 # Uses the candidate-X.Y channel to access pre-GA / tech-preview builds.
 # Only allows N -> N+1 minor upgrades (refuses skip-level).
@@ -17,6 +17,10 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
+
+for cmd in oc jq curl; do
+    check_command "$cmd" || exit 1
+done
 
 # -----------------------------------------------
 # 0. Argument parsing
@@ -228,11 +232,12 @@ else
 
     GRAPH_JSON=$(curl -sS "https://api.openshift.com/api/upgrades_info/v1/graph?channel=candidate-${TARGET_MINOR}&arch=amd64" 2>/dev/null || echo "{}")
 
-    # Find the latest version in the graph that starts with TARGET_MINOR
-    TARGET_VERSION=$(echo "$GRAPH_JSON" | jq -r --arg prefix "${TARGET_MINOR}." \
-        '[.nodes[] | select(.version | startswith($prefix))] | sort_by(.version) | last | .version // ""' 2>/dev/null || echo "")
-    TARGET_IMAGE=$(echo "$GRAPH_JSON" | jq -r --arg v "$TARGET_VERSION" \
-        '.nodes[] | select(.version==$v) | .payload // ""' 2>/dev/null || echo "")
+    GRAPH_TARGET=$(echo "$GRAPH_JSON" | jq -r --arg prefix "${TARGET_MINOR}." \
+        '.nodes[] | select(.version | startswith($prefix)) | [.version, .payload] | @tsv' 2>/dev/null \
+        | sort -V \
+        | tail -1 || echo "")
+    TARGET_VERSION="$(printf '%s' "$GRAPH_TARGET" | cut -f1)"
+    TARGET_IMAGE="$(printf '%s' "$GRAPH_TARGET" | cut -f2)"
 
     if [[ -z "$TARGET_VERSION" || -z "$TARGET_IMAGE" ]]; then
         log_error "No ${TARGET_MINOR}.x versions found in Red Hat update graph either."
@@ -246,6 +251,20 @@ else
     log_warn "Release image: ${TARGET_IMAGE}"
 fi
 
+if [[ "${TARGET_MINOR}" == "4.22" ]]; then
+    guard_known_bad_techpreview_payload "${TARGET_VERSION}" "4.22 TechPreviewNoUpgrade validation" || exit 1
+fi
+
+if ! [[ "${TARGET_VERSION}" =~ ^4\.[0-9]+\.[0-9]+(-(ec|rc)\.[0-9]+)?$ ]]; then
+    log_error "Selected target version has an unexpected format: ${TARGET_VERSION}"
+    exit 1
+fi
+
+if [[ "${USE_TO_IMAGE:-false}" == "true" ]] && ! [[ "${TARGET_IMAGE}" =~ ^[^[:space:]]+@sha256:[0-9a-fA-F]{64}$ ]]; then
+    log_error "Selected target release image has an unexpected format: ${TARGET_IMAGE}"
+    exit 1
+fi
+
 if [[ "$UPGRADEABLE" != "True" ]]; then
     FORCE_FLAG="--force"
 fi
@@ -256,16 +275,16 @@ fi
 log_info "Triggering upgrade to ${TARGET_VERSION}..."
 
 if [[ "${USE_TO_IMAGE:-false}" == "true" ]]; then
-    UPGRADE_CMD="oc adm upgrade --to-image=${TARGET_IMAGE} --allow-explicit-upgrade --force"
+    UPGRADE_CMD=(oc adm upgrade "--to-image=${TARGET_IMAGE}" --allow-explicit-upgrade --force)
     log_warn "Using --to-image with --allow-explicit-upgrade (no graph edge from current version)."
 else
-    UPGRADE_CMD="oc adm upgrade --to=${TARGET_VERSION}"
-    [[ -n "$USE_NOT_RECOMMENDED" ]] && UPGRADE_CMD+=" $USE_NOT_RECOMMENDED"
-    [[ -n "$FORCE_FLAG" ]] && UPGRADE_CMD+=" $FORCE_FLAG"
+    UPGRADE_CMD=(oc adm upgrade "--to=${TARGET_VERSION}")
+    [[ -n "$USE_NOT_RECOMMENDED" ]] && UPGRADE_CMD+=("$USE_NOT_RECOMMENDED")
+    [[ -n "$FORCE_FLAG" ]] && UPGRADE_CMD+=("$FORCE_FLAG")
 fi
 
-log_info "Running: $UPGRADE_CMD"
-eval "$UPGRADE_CMD"
+log_info "Running: ${UPGRADE_CMD[*]}"
+"${UPGRADE_CMD[@]}"
 log_ok "Upgrade initiated to ${TARGET_VERSION}."
 
 # -----------------------------------------------
