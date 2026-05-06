@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 02-cnv-pull-secret.sh - Add quay.io/openshift-cnv auth to cluster pull-secret
+# 05-cnv-pull-secret.sh - Add quay.io/openshift-cnv auth to cluster pull-secret
 #
 # Implements Steps 4-5 of Red Hat KB 6070641:
 #   - Adds quay.io/openshift-cnv credentials to the global pull-secret
@@ -32,7 +32,7 @@ else
 fi
 
 echo "============================================="
-echo " Phase 2: Add quay.io/openshift-cnv Pull Secret"
+echo " Phase 5: Add quay.io/openshift-cnv Pull Secret"
 echo "============================================="
 
 # -----------------------------------------------
@@ -117,5 +117,5 @@ log_ok "============================================="
 log_ok " Pull-secret configured and rolled out!"
 log_ok "============================================="
 log_ok "  quay.io/openshift-cnv auth added to all nodes."
-log_ok "  Next step: run 03-cnv-install.sh"
+log_ok "  Next step: run 06-cnv-install.sh"
 log_ok "============================================="

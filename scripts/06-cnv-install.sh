@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 03-cnv-install.sh - Install pre-release OpenShift Virtualization (CNV) via CLI
+# 06-cnv-install.sh - Install pre-release OpenShift Virtualization (CNV) via CLI
 #
 # Implements Steps 6-9 (CLI path) of Red Hat KB 6070641:
 #   - Applies CatalogSource for the nightly CNV index
@@ -9,7 +9,7 @@
 #   - Waits for all components to become Available
 #
 # Prerequisites:
-#   - 02-cnv-pull-secret.sh has been run (quay.io/openshift-cnv auth in cluster)
+#   - 05-cnv-pull-secret.sh has been run (quay.io/openshift-cnv auth in cluster)
 #   - oc logged in as cluster-admin
 #
 # Environment variables:
@@ -22,7 +22,7 @@ source "${SCRIPT_DIR}/env.sh"
 export CNV_VERSION="${CNV_VERSION:-4.99}"
 
 echo "============================================="
-echo " Phase 3: Install OpenShift Virtualization"
+echo " Phase 6: Install OpenShift Virtualization"
 echo "   CNV nightly version: ${CNV_VERSION}"
 echo "============================================="
 
@@ -48,7 +48,7 @@ CNV_AUTH=$(oc get secret pull-secret -n openshift-config -o json \
 
 if [[ -z "$CNV_AUTH" ]]; then
     log_error "quay.io/openshift-cnv auth not found in cluster pull-secret."
-    log_error "Run 02-cnv-pull-secret.sh first."
+    log_error "Run 05-cnv-pull-secret.sh first."
     exit 1
 fi
 log_ok "quay.io/openshift-cnv auth present in pull-secret."
@@ -56,7 +56,7 @@ log_ok "quay.io/openshift-cnv auth present in pull-secret."
 # Check MCP is healthy
 if ! oc wait mcp master worker --for=condition=Updated --timeout=30s &>/dev/null; then
     log_error "MachineConfigPools are not in Updated state."
-    log_error "Wait for the rollout to complete or re-run 02-cnv-pull-secret.sh."
+    log_error "Wait for the rollout to complete or re-run 05-cnv-pull-secret.sh."
     exit 1
 fi
 log_ok "MachineConfigPools are Updated."

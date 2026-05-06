@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Phase 5 — Run the OCP Virt Validation Checkup
+# 08-cnv-validation-checkup.sh - Run the OCP Virt Validation Checkup
 # https://github.com/openshift-cnv/ocp-virt-validation-checkup
 #
 # Usage:
-#   ./scripts/05-cnv-validation-checkup.sh            # run with defaults
-#   TEST_SUITES=compute ./scripts/05-cnv-validation-checkup.sh   # single suite
-#   DRY_RUN=true ./scripts/05-cnv-validation-checkup.sh          # preview only
+#   ./scripts/08-cnv-validation-checkup.sh            # run with defaults
+#   TEST_SUITES=compute ./scripts/08-cnv-validation-checkup.sh   # single suite
+#   DRY_RUN=true ./scripts/08-cnv-validation-checkup.sh          # preview only
 #
 # Prerequisites:
 #   - oc logged in to the cluster as kube:admin
@@ -38,7 +38,7 @@ RESULTS_DIR="${_REPO_ROOT}/.checkup-runs"
 # ---------------------------------------------------------------------------
 # Preflight checks
 # ---------------------------------------------------------------------------
-log_info "=== Phase 5: OCP Virt Validation Checkup ==="
+log_info "=== Phase 8: OCP Virt Validation Checkup ==="
 
 check_command oc   || exit 1
 check_command podman || exit 1
@@ -209,8 +209,8 @@ if [[ -n "${CM_DATA}" ]]; then
 fi
 
 if [[ "${JOB_STATUS}" == "Complete" ]]; then
-  log_ok  "Phase 5 complete."
+  log_ok  "Phase 8 complete."
 else
-  log_warn "Phase 5 finished with status: ${JOB_STATUS}. Review logs and results above."
+  log_warn "Phase 8 finished with status: ${JOB_STATUS}. Review logs and results above."
   exit 1
 fi

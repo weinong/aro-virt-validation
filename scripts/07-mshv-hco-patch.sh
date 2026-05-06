@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Phase 8 — Patch HCO for MSHV (hyperv-direct) support
+# 07-mshv-hco-patch.sh - Patch HCO for MSHV (hyperv-direct) support
 #
 # Applies the kubevirt jsonpatch annotation to enable:
 #   - ConfigurableHypervisor + hyperv-direct hypervisor
@@ -16,9 +16,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 
-log_info "=== Phase 8: Patch HCO for MSHV ==="
+log_info "=== Phase 7: Patch HCO for MSHV ==="
 
 check_command oc || exit 1
+check_command jq || exit 1
 
 log_info "Verifying cluster login..."
 oc whoami &>/dev/null || { log_error "Not logged in."; exit 1; }
@@ -57,16 +58,8 @@ log_ok "HCO annotated."
 # ---------------------------------------------------------------------------
 # Step 2: Check if KubeVirt CRD supports hypervisors field
 # ---------------------------------------------------------------------------
-HAS_HV_FIELD="$(oc get crd kubevirts.kubevirt.io -o json 2>/dev/null | \
-  python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    props=d['spec']['versions'][0]['schema']['openAPIV3Schema']['properties']['spec']['properties']['configuration']['properties']
-    print('true' if 'hypervisors' in props else 'false')
-except (KeyError, IndexError):
-    print('false')
-" 2>/dev/null || echo "false")"
+HAS_HV_FIELD="$(oc get crd kubevirts.kubevirt.io -o json 2>/dev/null \
+  | jq -r 'any(.spec.versions[]?.schema.openAPIV3Schema.properties.spec.properties.configuration.properties; has("hypervisors"))' 2>/dev/null || echo "false")"
 
 if [[ "${HAS_HV_FIELD}" == "false" ]]; then
   log_warn "KubeVirt CRD does NOT have hypervisors field."
@@ -123,4 +116,4 @@ log_info "KubeVirt hypervisors:"
 oc get kubevirt kubevirt-kubevirt-hyperconverged -n openshift-cnv \
   -o jsonpath='{.spec.configuration.hypervisors}' 2>/dev/null | jq '.' 2>/dev/null || true
 
-log_ok "Phase 8 complete. MSHV configuration applied."
+log_ok "Phase 7 complete. MSHV configuration applied."
