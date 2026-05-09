@@ -73,11 +73,11 @@ EXISTING_AUTH=$(oc get secret pull-secret -n openshift-config -o json \
 if [[ "$EXISTING_AUTH" == "$QUAY_AUTH" ]]; then
     log_ok "quay.io/openshift-cnv auth already configured and matches. Skipping update."
     log_info "Checking MachineConfigPool status..."
-    if oc wait mcp master worker --for=condition=Updated --timeout=30s &>/dev/null; then
+    if oc wait mcp --all --for=condition=Updated --timeout=30s &>/dev/null; then
         log_ok "MachineConfigPools are already Updated. Nothing to do."
     else
         log_warn "MachineConfigPools are still rolling out. Waiting..."
-        oc wait mcp master worker --for=condition=Updated --timeout=20m
+        oc wait mcp --all --for=condition=Updated --timeout=30m
         log_ok "MachineConfigPools updated."
     fi
     exit 0
@@ -111,7 +111,7 @@ log_ok "Pull-secret updated with quay.io/openshift-cnv credentials."
 log_info "Waiting for MachineConfigPool rollout (this may take 10-20 minutes due to node reboots)..."
 log_info "You can monitor progress with: oc get mcp -w"
 
-oc wait mcp master worker --for=condition=Updated --timeout=20m
+oc wait mcp --all --for=condition=Updated --timeout=30m
 
 log_ok "============================================="
 log_ok " Pull-secret configured and rolled out!"
