@@ -72,10 +72,14 @@ if [[ "${RHEL10_STREAM}" != "rhel-10" ]]; then
 fi
 log_ok "rhel-10 OS stream is available."
 
-log_info "Disabling ARO MachineSet reconciliation for custom MSHV MachineSets..."
-oc patch cluster.aro.openshift.io cluster --type=merge \
-  -p '{"spec":{"operatorflags":{"aro.machineset.enabled":"false"}}}'
-log_ok "ARO MachineSet reconciliation disabled."
+if oc get crd clusters.aro.openshift.io &>/dev/null && oc get cluster.aro.openshift.io cluster &>/dev/null; then
+  log_info "Disabling ARO MachineSet reconciliation for custom MSHV MachineSets..."
+  oc patch cluster.aro.openshift.io cluster --type=merge \
+    -p '{"spec":{"operatorflags":{"aro.machineset.enabled":"false"}}}'
+  log_ok "ARO MachineSet reconciliation disabled."
+else
+  log_info "No ARO cluster custom resource detected (self-managed installer cluster); skipping aro.machineset.enabled patch."
+fi
 
 log_info "Creating dedicated MachineConfigPool 'mshv'..."
 cat <<'EOF' | oc apply -f -
@@ -137,24 +141,29 @@ while true; do
   ELAPSED=$((ELAPSED + 15))
 done
 
-EXISTING_MS="$(oc get machinesets -n openshift-machine-api -o jsonpath='{.items[0].metadata.name}')"
+EXISTING_MS="$(oc get machineset.machine.openshift.io -n openshift-machine-api \
+  -o jsonpath='{range .items[?(@.spec.replicas>0)]}{.metadata.name}{"\n"}{end}' \
+  | head -n1)"
+if [[ -z "${EXISTING_MS}" ]]; then
+  EXISTING_MS="$(oc get machineset.machine.openshift.io -n openshift-machine-api -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo '')"
+fi
 if [[ -z "${EXISTING_MS}" ]]; then
   log_error "No existing MachineSet found to use as a providerSpec template."
   exit 1
 fi
 
-CLUSTER_ID="$(oc get machineset "${EXISTING_MS}" -n openshift-machine-api \
+CLUSTER_ID="$(oc get machineset.machine.openshift.io "${EXISTING_MS}" -n openshift-machine-api \
   -o jsonpath='{.metadata.labels.machine\.openshift\.io/cluster-api-cluster}')"
 if [[ -z "${MSHV_MACHINESET_NAME}" ]]; then
   MSHV_MACHINESET_NAME="${CLUSTER_ID}-worker-mshv-${LOCATION}${MSHV_ZONE}"
 fi
 
 log_info "Creating MSHV MachineSet ${MSHV_MACHINESET_NAME}..."
-if oc get machineset "${MSHV_MACHINESET_NAME}" -n openshift-machine-api &>/dev/null; then
+if oc get machineset.machine.openshift.io "${MSHV_MACHINESET_NAME}" -n openshift-machine-api &>/dev/null; then
   log_ok "MachineSet ${MSHV_MACHINESET_NAME} already exists."
-  oc scale machineset "${MSHV_MACHINESET_NAME}" -n openshift-machine-api --replicas="${MSHV_REPLICAS}"
+  oc scale machineset.machine.openshift.io "${MSHV_MACHINESET_NAME}" -n openshift-machine-api --replicas="${MSHV_REPLICAS}"
 else
-  oc get machineset "${EXISTING_MS}" -n openshift-machine-api -o json \
+  oc get machineset.machine.openshift.io "${EXISTING_MS}" -n openshift-machine-api -o json \
     | jq --arg name "${MSHV_MACHINESET_NAME}" \
          --arg vmSize "${MSHV_VM_SIZE}" \
          --arg zone "${MSHV_ZONE}" \
@@ -186,7 +195,7 @@ log_info "Waiting for MSHV MachineSet readyReplicas=${MSHV_REPLICAS}..."
 MACHINE_TIMEOUT=2400
 ELAPSED=0
 while true; do
-  READY="$(oc get machineset "${MSHV_MACHINESET_NAME}" -n openshift-machine-api -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo '0')"
+  READY="$(oc get machineset.machine.openshift.io "${MSHV_MACHINESET_NAME}" -n openshift-machine-api -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo '0')"
   READY="${READY:-0}"
   if [[ "${READY}" -ge "${MSHV_REPLICAS}" ]]; then
     log_ok "MSHV MachineSet has ${READY} ready replica(s)."
@@ -194,20 +203,20 @@ while true; do
   fi
   if [[ "${ELAPSED}" -ge "${MACHINE_TIMEOUT}" ]]; then
     log_error "Timeout waiting for MSHV MachineSet."
-    oc get machineset "${MSHV_MACHINESET_NAME}" -n openshift-machine-api -o yaml
-    oc get machines -n openshift-machine-api -o wide
+    oc get machineset.machine.openshift.io "${MSHV_MACHINESET_NAME}" -n openshift-machine-api -o yaml
+    oc get machine.machine.openshift.io -n openshift-machine-api -o wide
     exit 1
   fi
   sleep 30
   ELAPSED=$((ELAPSED + 30))
 done
 
-NODE_NAME="$(oc get machines -n openshift-machine-api \
+NODE_NAME="$(oc get machine.machine.openshift.io -n openshift-machine-api \
   -l machine.openshift.io/cluster-api-machineset="${MSHV_MACHINESET_NAME}" \
   -o jsonpath='{.items[0].status.nodeRef.name}')"
 if [[ -z "${NODE_NAME}" ]]; then
   log_error "MSHV Machine does not have a nodeRef."
-  oc get machines -n openshift-machine-api -l machine.openshift.io/cluster-api-machineset="${MSHV_MACHINESET_NAME}" -o yaml
+  oc get machine.machine.openshift.io -n openshift-machine-api -l machine.openshift.io/cluster-api-machineset="${MSHV_MACHINESET_NAME}" -o yaml
   exit 1
 fi
 
