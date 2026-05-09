@@ -26,7 +26,7 @@ if [[ -n "${TARGET_OCP_VERSION}" ]]; then
 else
     log_warn "  TARGET_OCP_VERSION is not set."
     log_warn "  Set TARGET_OCP_VERSION to the intended 4.22 payload before creating a cluster for TechPreview/MSHV validation."
-    log_warn "  Known-bad payloads such as 4.22.0-rc.2 will still be blocked later by upgrade and TechPreview scripts."
+    log_warn "  Known-bad payloads such as 4.22.0-rc.3 will still be blocked later by upgrade and TechPreview scripts."
 fi
 
 # -----------------------------------------------
