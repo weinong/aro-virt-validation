@@ -63,7 +63,7 @@ This checks Azure login, required providers, base DSv5 quota, Ddsv6 quota for th
 
 Set `TARGET_OCP_VERSION` to the intended 4.22 payload before creating a cluster
 for TechPreview/MSHV validation. The prereq check blocks known-bad payloads, such
-as `4.22.0-rc.2`, before any Azure resources are created:
+as `4.22.0-rc.3`, before any Azure resources are created:
 
 ```sh
 TARGET_OCP_VERSION=<newer-4.22-version> ./scripts/00-prereqs.sh
@@ -113,7 +113,7 @@ This is intentionally after minor-version upgrades and before CNV/MSHV setup.
 `TechPreviewNoUpgrade` is irreversible and prevents future minor-version
 upgrades on this cluster.
 
-Do not use `4.22.0-rc.2` or older 4.22 pre-release payloads for this phase. They
+Do not use `4.22.0-rc.3` or older 4.22 pre-release payloads for this phase. They
 are blocked by a known TechPreview payload issue where CVO can try to apply
 `CRIOCredentialProviderConfig` before its CRD is served. Upgrade to a newer 4.22
 payload first. `scripts/02-upgrade-cluster.sh 4.22` also refuses to select those

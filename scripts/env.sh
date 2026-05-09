@@ -21,7 +21,7 @@ export WORKER_COUNT="${WORKER_COUNT:-3}"
 export WORKER_DISK_SIZE_GB="${WORKER_DISK_SIZE_GB:-128}"
 
 # Target OCP payload used before enabling TechPreviewNoUpgrade for MSHV/RHCOS 10.
-# 4.22.0-rc.2 and older 4.22 pre-release payloads are blocked by a known
+# 4.22.0-rc.3 and older 4.22 pre-release payloads are blocked by a known
 # TechPreview CR-before-CRD issue in this validation path.
 export TARGET_OCP_VERSION="${TARGET_OCP_VERSION:-}"
 
@@ -74,7 +74,7 @@ is_known_bad_techpreview_payload() {
   if [[ "${version}" =~ ^4\.22\.0-(ec|rc)\.([0-9]+)$ ]]; then
     local pre_release_kind="${BASH_REMATCH[1]}"
     local pre_release_number="${BASH_REMATCH[2]}"
-    [[ "${pre_release_kind}" == "ec" || "${pre_release_number}" -le 2 ]]
+    [[ "${pre_release_kind}" == "ec" || "${pre_release_number}" -le 3 ]]
     return
   fi
   return 1
@@ -91,7 +91,7 @@ guard_known_bad_techpreview_payload() {
       return 0
     fi
     log_error "Payload ${version} is blocked for ${context}."
-    log_error "Known issue: 4.22.0-rc.2 and older 4.22 pre-release payloads can fail applying CRIOCredentialProviderConfig before its CRD is served."
+    log_error "Known issue: 4.22.0-rc.3 and older 4.22 pre-release payloads can fail applying CRIOCredentialProviderConfig before its CRD is served."
     log_error "Use a newer 4.22 payload before enabling TechPreviewNoUpgrade."
     log_error "Set ALLOW_KNOWN_BAD_TECHPREVIEW_PAYLOAD=true only to deliberately reproduce/document this issue."
     return 1
