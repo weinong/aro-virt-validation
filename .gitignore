@@ -5,3 +5,4 @@ global-pull-secret.json
 .upgrade-snapshots/
 docs/6070641.md
 .checkup-runs/
+.smoke-runs/
