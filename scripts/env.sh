@@ -121,3 +121,59 @@ assert 'auths' in d
     return 2
   fi
 }
+
+# Load QUAY_USERNAME and QUAY_PASSWORD from a simple KEY=VALUE file without
+# evaluating it as shell. Only these two keys are accepted.
+load_quay_pullsecret() {
+  local file="$1"
+  local line key value first last
+  local found_username=false
+  local found_password=false
+
+  if [[ ! -f "$file" ]]; then
+    log_error "Quay credential file not found: $file"
+    return 1
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" != *=* ]]; then
+      log_error "Invalid line in $file. Expected KEY=VALUE."
+      return 2
+    fi
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    if [[ "$key" != "QUAY_USERNAME" && "$key" != "QUAY_PASSWORD" ]]; then
+      log_error "Unexpected key '$key' in $file. Only QUAY_USERNAME and QUAY_PASSWORD are allowed."
+      return 2
+    fi
+
+    if [[ "${#value}" -ge 2 ]]; then
+      first="${value:0:1}"
+      last="${value: -1}"
+      if [[ "$first" == "$last" && ( "$first" == "'" || "$first" == '"' ) ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+
+    case "$key" in
+      QUAY_USERNAME)
+        QUAY_USERNAME="$value"
+        found_username=true
+        ;;
+      QUAY_PASSWORD)
+        QUAY_PASSWORD="$value"
+        found_password=true
+        ;;
+    esac
+  done < "$file"
+
+  if [[ "$found_username" != "true" || "$found_password" != "true" ]]; then
+    log_error "QUAY_USERNAME and QUAY_PASSWORD must both be set in $file."
+    return 3
+  fi
+
+  export QUAY_USERNAME QUAY_PASSWORD
+}

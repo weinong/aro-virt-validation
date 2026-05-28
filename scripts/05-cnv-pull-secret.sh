@@ -8,27 +8,20 @@
 #
 # Prerequisites:
 #   - ARO cluster created and oc logged in as cluster-admin
-#   - .env file with QUAY_USERNAME and QUAY_PASSWORD at repo root
+#   - .quay-pullsecret file with QUAY_USERNAME and QUAY_PASSWORD at repo root
 #   - Quay user has accepted the openshift-cnv org invitation
 # =============================================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 
-# Load .env from repo root (only set vars if not already in environment)
-_ENV_FILE="${_REPO_ROOT}/.env"
-if [[ -f "$_ENV_FILE" ]]; then
-    log_info "Loading credentials from $_ENV_FILE"
-    while IFS='=' read -r key value; do
-        # Skip comments and blank lines
-        [[ -z "$key" || "$key" =~ ^# ]] && continue
-        # Only set if not already exported
-        if [[ -z "${!key:-}" ]]; then
-            export "$key=$value"
-        fi
-    done < "$_ENV_FILE"
+# Load .quay-pullsecret from repo root (only set vars if not already in environment)
+_QUAY_PULLSECRET_FILE="${QUAY_PULLSECRET_FILE:-${_REPO_ROOT}/.quay-pullsecret}"
+if [[ -f "$_QUAY_PULLSECRET_FILE" ]]; then
+    log_info "Loading credentials from $_QUAY_PULLSECRET_FILE"
+    load_quay_pullsecret "$_QUAY_PULLSECRET_FILE"
 else
-    log_warn ".env file not found at $_ENV_FILE"
+    log_warn ".quay-pullsecret file not found at $_QUAY_PULLSECRET_FILE"
 fi
 
 echo "============================================="
@@ -50,7 +43,7 @@ fi
 log_ok "Logged in as: $(oc whoami)"
 
 if [[ -z "${QUAY_USERNAME:-}" || -z "${QUAY_PASSWORD:-}" ]]; then
-    log_error "QUAY_USERNAME and QUAY_PASSWORD must be set (via .env or environment)"
+    log_error "QUAY_USERNAME and QUAY_PASSWORD must be set (via .quay-pullsecret or environment)"
     exit 1
 fi
 log_ok "Quay credentials loaded for user: $QUAY_USERNAME"
