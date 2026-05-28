@@ -1,249 +1,198 @@
 # ARO OpenShift Virtualization Validation
 
-End-to-end automation for creating an Azure Red Hat OpenShift (ARO) validation
-cluster, preparing an MSHV/RHCOS 10 node, installing a nightly OpenShift
-Virtualization build, enabling `hyperv-direct`, and running validation only after
-the infrastructure path is understood.
+Makefile-driven automation for OpenShift Virtualization validation on ARO or a
+self-managed OpenShift cluster.
 
-The current workflow is ordered to keep cluster upgrades and irreversible feature
-gates ahead of CNV installation, and to avoid treating manual interventions as
-normal setup.
+Run commands from the repo root. Start with:
+
+```sh
+make help
+```
 
 ## Prerequisites
 
 - Azure CLI >= 2.84.0, logged in with `az login`
-- `oc` client >= 4.6.0
-- `jq`, `base64`, `curl`, `podman`
-- A Red Hat pull secret at repo root: `.pull-secret.txt`
-- A quay.io account with access to the `openshift-cnv` organization
-- Azure quota in `centralus` for both the base cluster and `Standard_D192ds_v6`
+- `oc`, `jq`, `base64`, `curl`, and `podman`
+- Azure quota in the target region for the base cluster and `Standard_D192ds_v6`
 
-Create `.env` at repo root with quay.io credentials:
-
-```sh
-QUAY_USERNAME=<your quay.io username>
-QUAY_PASSWORD=<your encrypted password from quay.io Account Settings>
-```
-
-## Repository Structure
+Local secrets are expected in:
 
 ```text
-.env                           # Quay.io credentials (gitignored)
-.pull-secret.txt               # Red Hat pull secret (gitignored)
-.upgrade-snapshots/            # Pre/post upgrade snapshots (gitignored)
-.checkup-runs/                 # Validation run artifacts (gitignored)
-issues/                        # Dated findings and issue reports
-scripts/
-  env.sh                       # Shared environment variables and helpers
-  00-prereqs.sh                # Validate local/Azure prerequisites and quota
-  01-aro-infra.sh              # Create ARO cluster with managed identities
-  02-upgrade-cluster.sh        # Upgrade OCP one minor version at a time
-  03-techpreview-setup.sh      # Enable and verify TechPreviewNoUpgrade
-  04-mshv-node-setup.sh        # Declarative MSHV MCP/MachineSet/RHCOS 10 setup
-  05-cnv-pull-secret.sh        # Add quay.io/openshift-cnv pull secret
-  06-cnv-install.sh            # Install CNV nightly operator and HCO
-  07-mshv-hco-patch.sh         # Enable KubeVirt hyperv-direct through HCO
-  08-cnv-validation-checkup.sh # Run ocp-virt-validation-checkup
+.quay-pullsecret  # QUAY_USERNAME and QUAY_PASSWORD
+.pullsecret       # Red Hat pull secret
 ```
 
-## Revised Workflow
-
-Run commands from the repo root and source `.env` where credentials are needed.
-Do not run the validation checkup until the MSHV node and KubeVirt device path
-are verified.
-
-### Phase 0: Prerequisites
+For a fresh checkout, download both from Key Vault:
 
 ```sh
-./scripts/00-prereqs.sh
+REGISTRY=arol1vh make download-local-secrets
 ```
 
-This checks Azure login, required providers, base DSv5 quota, Ddsv6 quota for the
-`Standard_D192ds_v6` MSHV node, local tooling, and `.pull-secret.txt`.
-
-Set `TARGET_OCP_VERSION` to the intended 4.22 payload before creating a cluster
-for TechPreview/MSHV validation. The prereq check blocks known-bad payloads, such
-as `4.22.0-rc.3`, before any Azure resources are created:
-
-```sh
-TARGET_OCP_VERSION=<newer-4.22-version> ./scripts/00-prereqs.sh
-```
-
-If `TARGET_OCP_VERSION` is omitted, the prereq phase warns and later phases still
-block known-bad upgrade or TechPreview targets.
-
-### Phase 1: Create ARO
-
-```sh
-./scripts/01-aro-infra.sh
-```
-
-The script creates the resource group, VNet, managed identities, role
-assignments, and ARO cluster. After it completes, log in with the command printed
-by the script and verify baseline state:
-
-```sh
-oc whoami
-oc get clusterversion version
-oc get co
-oc get mcp
-az aro show -g "$RESOURCEGROUP" -n "$CLUSTER" -o table
-```
-
-### Phase 2: Upgrade To Target OCP
-
-If the cluster is not already on the target 4.22 build, upgrade before enabling
-TechPreviewNoUpgrade or installing CNV:
-
-```sh
-./scripts/02-upgrade-cluster.sh 4.21
-./scripts/02-upgrade-cluster.sh 4.22
-```
-
-The script only allows `N -> N+1` minor upgrades. Wait for each hop to complete
-and for ClusterOperators and `master/worker` MCPs to settle before proceeding.
-
-### Phase 3: Enable TechPreviewNoUpgrade
-
-```sh
-./scripts/03-techpreview-setup.sh
-```
-
-This is intentionally after minor-version upgrades and before CNV/MSHV setup.
-`TechPreviewNoUpgrade` is irreversible and prevents future minor-version
-upgrades on this cluster.
-
-Do not use `4.22.0-rc.3` or older 4.22 pre-release payloads for this phase. They
-are blocked by a known TechPreview payload issue where CVO can try to apply
-`CRIOCredentialProviderConfig` before its CRD is served. Upgrade to a newer 4.22
-payload first. `scripts/02-upgrade-cluster.sh 4.22` also refuses to select those
-known-bad targets. To intentionally reproduce the issue for investigation only,
-set `ALLOW_KNOWN_BAD_TECHPREVIEW_PAYLOAD=true`.
-
-The script waits for operators, MCPs, and ClusterVersion to settle, then verifies
-TechPreview-gated extension CRDs needed by the next phases:
+Secret usage:
 
 ```text
-criocredentialproviderconfigs.config.openshift.io
-dnsnameresolvers.network.openshift.io
-osimagestreams.machineconfiguration.openshift.io
+.pullsecret        Downloaded from Key Vault secret ocp-pullsecret. Used by
+                   make aro-up as the ARO cluster pull secret and by make
+                   ocp-up for self-managed OpenShift install-config.
+.quay-pullsecret   Downloaded from Key Vault secret quay-pullsecret. Sourced by
+                   cnv-pull-secret and validation-checkup for QUAY_USERNAME and
+                   QUAY_PASSWORD.
 ```
 
-If ClusterVersion is still progressing/failing or a required CRD is missing, stop
-and document it as an issue. Do not silently apply payload CRDs and call that a
-fix.
-
-### Phase 4: Create MSHV Node Declaratively
-
-Run the MSHV setup after the `rhel-10` OS stream is available:
+Upload targets are for maintaining the Key Vault copies, not normal validation
+runs:
 
 ```sh
-./scripts/04-mshv-node-setup.sh
+make upload-pull-secret
+make upload-quay-pullsecret
 ```
 
-The script first verifies ClusterVersion is settled, no ClusterOperators are
-degraded, and the `rhel-10` OS stream is present. It only disables ARO MachineSet
-reconciliation after those preflight checks pass.
+## Recommended Flows
 
-The script:
-
-1. Verifies `OSImageStream/cluster` advertises the `rhel-10` stream.
-2. Disables ARO MachineSet reconciliation before creating custom MachineSets.
-3. Creates the `mshv` MachineConfigPool with `spec.osImageStream.name: rhel-10`.
-4. Creates a declarative MachineConfig for persistent
-   `/etc/modules-load.d/mshv-root.conf`.
-5. Verifies the `mshv` MCP renders before creating the node.
-6. Creates a `Standard_D192ds_v6` MachineSet with the L1VH placement tag.
-7. Labels the node as `node-role.kubernetes.io/mshv=` while the MCP inherits
-   worker MachineConfigs through `machineConfigSelector`.
-8. Waits for normal MachineSet and MCP convergence.
-9. Verifies RHCOS 10, L1VH, `/dev/mshv`, `/dev/vhost-net`, and `mshv_root`.
-
-This script deliberately does not create direct Machines, hand-built rendered
-MachineConfigs, direct `osImageURL` pins, or manual node `desiredConfig`
-annotations. If those become necessary, stop and document the
-product/declarative-path issue.
-
-Optional environment variables:
+Self-managed OpenShift:
 
 ```sh
-MSHV_VM_SIZE=Standard_D192ds_v6
-MSHV_DISK_SIZE_GB=256
-MSHV_ZONE=1
-MSHV_REPLICAS=1
-MSHV_MACHINESET_NAME=<override-name>
+make ocp-validation-flow
 ```
 
-### Phase 5: Add CNV Pull Secret
+ARO:
 
 ```sh
-./scripts/05-cnv-pull-secret.sh
+make aro-validation-flow
 ```
 
-This adds `quay.io/openshift-cnv` credentials to the global pull secret and waits
-for MCP rollout.
+Prefer the individual phase targets below when investigating failures.
 
-### Phase 6: Install CNV Nightly
+## Self-Managed OCP
+
+Create the cluster and print access details:
 
 ```sh
-CNV_VERSION=4.99 ./scripts/06-cnv-install.sh
+make ocp-up
+make cluster-info
 ```
 
-This applies the nightly CNV CatalogSource, creates the `openshift-cnv`
-Namespace/OperatorGroup/Subscription, waits for the CSV, creates the
-HyperConverged CR, and waits for HCO availability.
-
-### Phase 7: Enable hyperv-direct
+Run validation phases manually:
 
 ```sh
-./scripts/07-mshv-hco-patch.sh
+export KUBECONFIG=$PWD/installer/auth/kubeconfig
+make techpreview
+make mshv-node
+make cnv-pull-secret
+CNV_VERSION=4.99 make cnv-install
+make mshv-hco-patch
+make validation-checkup
 ```
 
-Run this only after the MSHV node exposes `/dev/mshv` and `/dev/vhost-net`.
-The script uses the HCO `kubevirt.kubevirt.io/jsonpatch` annotation to enable
-`ConfigurableHypervisor`, set `hypervisors=[{"name":"hyperv-direct"}]`, and set
-`evictionStrategy: None`. It intentionally does not set `cpuModel`.
-
-Afterward verify:
+Common overrides:
 
 ```sh
-oc get kubevirt kubevirt-kubevirt-hyperconverged -n openshift-cnv -o yaml
-oc get node -l node-role.kubernetes.io/mshv -o jsonpath='{.items[0].status.allocatable}' | jq
-oc logs -n openshift-cnv -l kubevirt.io=virt-handler --tail=200 | grep -i mshv
+LOCATION=<azure-region> make ocp-up
+SSH_PUB_KEY=~/.ssh/id_ed25519.pub make ocp-up
+RELEASE_IMAGE=<release-image> make setup-tools
+SELF_MANAGED_CLUSTER=<cluster-name> make ocp-up
+SELF_MANAGED_BASE_DOMAIN=<base-domain> SELF_MANAGED_BASE_DOMAIN_RESOURCE_GROUP=<dns-rg> make ocp-up
 ```
 
-Expected node resources include:
+`make ocp-down` destroys the cluster from local `installer/` state.
+
+## ARO
+
+Create the cluster:
+
+```sh
+make aro-up
+```
+
+`make aro-up` creates a randomized resource group by default and writes `.aro.env`
+so cleanup can find it later.
+
+Common overrides:
+
+```sh
+LOCATION=<azure-region> make aro-up
+ARO_RESOURCEGROUP_PREFIX=my-aro make aro-up
+RESOURCEGROUP=my-rg CLUSTER=my-cluster make aro-up
+ARO_STATE_OVERWRITE=true make aro-up
+```
+
+After `make aro-up`, log in and run validation phases manually:
+
+```sh
+make aro-login
+make upgrade-to-4.22
+make techpreview
+make mshv-node
+make cnv-pull-secret
+CNV_VERSION=4.99 make cnv-install
+make mshv-hco-patch
+make validation-checkup
+```
+
+`make aro-down` deletes the ARO cluster and resource group from `.aro.env`.
+Override cleanup explicitly when needed:
+
+```sh
+RESOURCEGROUP=my-rg CLUSTER=my-cluster make aro-down
+```
+
+## Validation Options
+
+```sh
+TEST_SUITES=compute make validation-checkup
+TEST_SUITES=compute,network,storage STORAGE_CLASS=managed-csi make validation-checkup
+DRY_RUN=true make validation-checkup
+```
+
+Artifacts are saved under `.checkup-runs/<timestamp>/`.
+
+## Cleanup
+
+```sh
+make aro-down      # delete Makefile-created ARO cluster/resource group
+make ocp-down      # destroy self-managed OCP from installer/ state
+make clean         # remove installer/ state
+make clean-tools   # remove ocp-tools/
+```
+
+## Generated Files
+
+Important local/generated files are gitignored:
 
 ```text
-devices.kubevirt.io/mshv=1k
-devices.kubevirt.io/vhost-net=1k
-devices.kubevirt.io/kvm=0
+.quay-pullsecret
+.aro.env
+.pullsecret
+kubeconfig*
+installer/
+ocp-tools/
+.upgrade-snapshots/
+.checkup-runs/
+.smoke-runs/
 ```
 
-### Phase 8: Validation Checkup
+## Sharing Self-Managed Cluster Credentials
 
-Run a small VM smoke test first and capture VMI events, virt-launcher logs,
-libvirt/QEMU logs, guest console, and host dmesg. Only run the full checkup after
-the smoke result is understood.
+This is optional and not part of the normal validation workflow.
 
 ```sh
-./scripts/08-cnv-validation-checkup.sh
+make upload-cluster-credential
+make download-cluster-credential
 ```
 
-Useful options:
+The Key Vault credential secret names are shared within the vault, not per
+cluster or location: `kubeadmin-password` and `kubeconfig`. Uploading credentials
+for a new self-managed cluster can overwrite the previous values for that vault.
 
-```sh
-TEST_SUITES=compute,network,storage
-STORAGE_CLASS=managed-csi
-DRY_RUN=true
-```
+## Documenting Issues
 
-Artifacts are saved to `.checkup-runs/<timestamp>/`.
+Bug reports and findings go under `issues/` in `YYYY-MM-DD.md` format.
 
-## Stop-And-Document Rules
+Call out manual interventions explicitly. Do not describe one-off manual changes
+as fixes unless the normal declarative/product path works without them.
 
-Do not convert these into normal setup steps without explicitly documenting them
-as manual interventions:
+Do not convert these into normal setup steps without documenting the underlying
+issue:
 
 - Direct Machine creation instead of MachineSet reconciliation
 - Scaling `machine-api-operator` down to preserve manual controller edits
@@ -251,12 +200,6 @@ as manual interventions:
 - Node `machineconfiguration.openshift.io/desiredConfig` annotations
 - Manually applying missing payload CRDs
 - Removing node role labels by hand after the node joins
-- Treating `MSHV_CREATE_PARTITION unsupported` as root cause without corroborating
-  VM, QEMU, libvirt, or guest evidence
-
-Issue reports go in `issues/YYYY-MM-DD.md` and must separate normal declarative
-steps, manual interventions, unresolved product issues, validation failures, and
-warnings/red herrings.
 
 ## Caveats
 

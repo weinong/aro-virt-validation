@@ -156,21 +156,20 @@ else
 fi
 
 # -----------------------------------------------
-# 7. Check for .pull-secret.txt
+# 7. Check for .pullsecret
 # -----------------------------------------------
 log_info "Checking for Red Hat pull secret..."
-PULL_SECRET_FILE="${SCRIPT_DIR}/../.pull-secret.txt"
+PULL_SECRET_FILE="${SCRIPT_DIR}/../.pullsecret"
 validate_pull_secret "$PULL_SECRET_FILE"
 rc=$?
 if [[ $rc -eq 0 && -f "$PULL_SECRET_FILE" ]]; then
-    log_ok "  .pull-secret.txt: found and valid"
+    log_ok "  .pullsecret: found and valid"
 elif [[ $rc -eq 2 ]]; then
-    log_warn "  .pull-secret.txt: found but does not appear valid (expected JSON with 'auths' key)"
+    log_warn "  .pullsecret: found but does not appear valid (expected JSON with 'auths' key)"
     log_warn "  Re-download from: https://console.redhat.com/openshift/install/azure/aro-provisioned"
 else
-    log_warn "  .pull-secret.txt: not found in repo root"
-    log_warn "  Required for Phase 1. Download from:"
-    log_warn "    https://console.redhat.com/openshift/install/azure/aro-provisioned"
+    log_warn "  .pullsecret: not found in repo root"
+    log_warn "  Run: make .pullsecret"
 fi
 
 echo ""

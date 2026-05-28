@@ -300,22 +300,22 @@ CREATE_CMD=(
 )
 
 # Validate pull secret (required for OperatorHub / OpenShift Virtualization)
-PULL_SECRET_FILE="${SCRIPT_DIR}/../.pull-secret.txt"
+PULL_SECRET_FILE="${SCRIPT_DIR}/../.pullsecret"
 validate_pull_secret "$PULL_SECRET_FILE"
 rc=$?
 if [[ $rc -eq 1 ]]; then
-    log_error ".pull-secret.txt not found in repo root."
+    log_error ".pullsecret not found in repo root."
     log_error "This is required for OpenShift Virtualization (OperatorHub access)."
-    log_error "Download from: https://console.redhat.com/openshift/install/azure/aro-provisioned"
+    log_error "Run: make .pullsecret"
     exit 1
 elif [[ $rc -eq 2 ]]; then
-    log_error ".pull-secret.txt does not appear to be a valid Red Hat pull secret."
+    log_error ".pullsecret does not appear to be a valid Red Hat pull secret."
     log_error "Expected a JSON file containing an 'auths' key."
     log_error "Re-download from: https://console.redhat.com/openshift/install/azure/aro-provisioned"
     exit 1
 fi
 
-log_ok "  .pull-secret.txt validated"
+log_ok "  .pullsecret validated"
 CREATE_CMD+=(--pull-secret "@${PULL_SECRET_FILE}")
 
 "${CREATE_CMD[@]}"

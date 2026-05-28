@@ -1,8 +1,15 @@
 .env
-.pull-secret.txt
+.env.*
+.quay-pullsecret
+.aro.env
+.pull-secret.txt*
+.pullsecret
 global-pull-secret.json
+kubeconfig*
 *.tmp
 .upgrade-snapshots/
+installer/
+ocp-tools/
 docs/6070641.md
 .checkup-runs/
 .smoke-runs/

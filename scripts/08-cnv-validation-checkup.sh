@@ -18,8 +18,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
 
-# Load .env if present (contains QUAY_USERNAME / QUAY_PASSWORD)
-[[ -f "${_REPO_ROOT}/.env" ]] && source "${_REPO_ROOT}/.env"
+# Load .quay-pullsecret if present (contains QUAY_USERNAME / QUAY_PASSWORD)
+_QUAY_PULLSECRET_FILE="${QUAY_PULLSECRET_FILE:-${_REPO_ROOT}/.quay-pullsecret}"
+[[ -f "${_QUAY_PULLSECRET_FILE}" ]] && load_quay_pullsecret "${_QUAY_PULLSECRET_FILE}"
 
 # ---------------------------------------------------------------------------
 # Configurable parameters (override via environment)
@@ -72,7 +73,7 @@ if ! podman image exists "${OCP_VIRT_VALIDATION_IMAGE}" 2>/dev/null; then
     log_warn "Pull failed — attempting podman login to quay.io..."
     if [[ -n "${QUAY_USERNAME:-}" && -n "${QUAY_PASSWORD:-}" ]]; then
       echo "${QUAY_PASSWORD}" | podman login -u "${QUAY_USERNAME}" --password-stdin quay.io || {
-        log_error "podman login to quay.io failed. Check QUAY_USERNAME / QUAY_PASSWORD in .env."
+        log_error "podman login to quay.io failed. Check QUAY_USERNAME / QUAY_PASSWORD in .quay-pullsecret."
         exit 1
       }
       podman pull --quiet "${OCP_VIRT_VALIDATION_IMAGE}" || {
@@ -80,7 +81,7 @@ if ! podman image exists "${OCP_VIRT_VALIDATION_IMAGE}" 2>/dev/null; then
         exit 1
       }
     else
-      log_error "Cannot pull image. Set QUAY_USERNAME and QUAY_PASSWORD in .env, or run 'podman login quay.io' manually."
+      log_error "Cannot pull image. Set QUAY_USERNAME and QUAY_PASSWORD in .quay-pullsecret, or run 'podman login quay.io' manually."
       exit 1
     fi
   fi
