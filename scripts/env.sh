@@ -4,6 +4,17 @@
 # Source this file from each script: source "$(dirname "$0")/env.sh"
 # =============================================================================
 
+# Credentials file lives at the repo root (gitignored by .arc-sp-creds*.json)
+_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# --- Local overrides ---
+if [[ -f "${_REPO_ROOT}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${_REPO_ROOT}/.env"
+  set +a
+fi
+
 # --- Azure / ARO settings ---
 export LOCATION="${LOCATION:-centralus}"
 export RESOURCEGROUP="${RESOURCEGROUP:-aro-virt-test-rg}"
@@ -23,7 +34,7 @@ export WORKER_DISK_SIZE_GB="${WORKER_DISK_SIZE_GB:-128}"
 # Target OCP payload used before enabling TechPreviewNoUpgrade for MSHV/RHCOS 10.
 # 4.22.0-rc.3 and older 4.22 pre-release payloads are blocked by a known
 # TechPreview CR-before-CRD issue in this validation path.
-export TARGET_OCP_VERSION="${TARGET_OCP_VERSION:-}"
+export TARGET_OCP_VERSION="${TARGET_OCP_VERSION:-4.22.4}"
 
 # --- Managed Identity names (9 required for managed-identity ARO) ---
 export MI_CLUSTER="aro-cluster"
@@ -35,9 +46,6 @@ export MI_CLOUD_NET="cloud-network-config"
 export MI_IMAGE_REG="image-registry"
 export MI_FILE_CSI="file-csi-driver"
 export MI_ARO_OP="aro-operator"
-
-# Credentials file lives at the repo root (gitignored by .arc-sp-creds*.json)
-_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- KubeVirt VM settings ---
 export VM_NAME="${VM_NAME:-rhel9-arc-demo}"

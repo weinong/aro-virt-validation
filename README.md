@@ -58,7 +58,7 @@ make ocp-validation-flow
 ARO:
 
 ```sh
-make aro-validation-flow
+TARGET_OCP_VERSION=4.22.4 make aro-validation-flow
 ```
 
 Prefer the individual phase targets below when investigating failures.
@@ -120,7 +120,8 @@ After `make aro-up`, log in and run validation phases manually:
 
 ```sh
 make aro-login
-make upgrade-to-4.22
+make aro-disable-machineset-reconcile
+TARGET_OCP_VERSION=4.22.4 make upgrade-to-4.22.4
 make techpreview
 make mshv-node
 make cnv-pull-secret
@@ -205,6 +206,8 @@ issue:
 
 - Upgrading beyond versions listed in `az aro get-versions` is unsupported by
   Microsoft and appropriate only for lab validation clusters.
+- The ARO validation flow is pinned to exact OCP `4.22.4`; it fails rather than
+  falling back to another `4.22.z` payload.
 - `TechPreviewNoUpgrade` is irreversible on the cluster.
 - CNV nightly builds are unsupported and must not be used in production.
 - The MSHV path depends on Azure L1VH placement for `Standard_D192ds_v6` and on
