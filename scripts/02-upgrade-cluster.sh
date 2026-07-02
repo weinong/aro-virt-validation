@@ -355,6 +355,8 @@ if oc get crd clusters.aro.openshift.io &>/dev/null && [[ -n "${RESOURCEGROUP:-}
     log_info "Verifying Azure ARO resource matches the logged-in API server..."
     OC_SERVER="$(oc whoami --show-server 2>/dev/null || echo '')"
     ARO_SERVER="$(az aro show --resource-group "${RESOURCEGROUP}" --name "${CLUSTER}" --query apiserverProfile.url -o tsv 2>/dev/null || echo '')"
+    OC_SERVER="${OC_SERVER%/}"
+    ARO_SERVER="${ARO_SERVER%/}"
     if [[ -z "${ARO_SERVER}" || "${ARO_SERVER}" != "${OC_SERVER}" ]]; then
         log_error "Azure ARO resource ${RESOURCEGROUP}/${CLUSTER} does not match the logged-in cluster."
         log_error "  oc server:  ${OC_SERVER:-<unknown>}"
