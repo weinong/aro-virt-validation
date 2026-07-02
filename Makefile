@@ -20,6 +20,7 @@ TOOLS_DIR       ?= ocp-tools
 CNV_VERSION     ?= 4.99
 TEST_SUITES     ?= compute,network,storage
 STORAGE_CLASS   ?= managed-csi
+TARGET_OCP_VERSION ?= 4.22.4
 
 # Tool paths
 OC                = $(TOOLS_DIR)/oc
@@ -45,7 +46,7 @@ NC     := $(shell printf '\033[0m')
 	upload-cluster-credential download-cluster-credential cluster-info \
 	ocp-up ocp-down \
 	upload-quay-pullsecret refresh-quay-pullsecret upload-pull-secret upload-local-secrets download-local-secrets \
-	prereqs aro-up aro-login aro-down upgrade-4.21 upgrade-4.22 upgrade-to-4.22 techpreview mshv-node cnv-pull-secret \
+	prereqs check-upgrade-target aro-up aro-login aro-disable-machineset-reconcile aro-down upgrade-4.21 upgrade-4.22 upgrade-to-4.22 upgrade-to-4.22.4 techpreview mshv-node cnv-pull-secret \
 	cnv-install mshv-hco-patch validation-checkup aro-validation-flow ocp-validation-flow
 
 .NOTPARALLEL: aro-validation-flow ocp-validation-flow
@@ -75,6 +76,7 @@ help: ## Show this help message
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "CNV_VERSION" "CNV nightly version (default: $(CNV_VERSION))"
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "TEST_SUITES" "Validation suites (default: $(TEST_SUITES))"
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "STORAGE_CLASS" "Validation storage class (default: $(STORAGE_CLASS))"
+	@printf "  $(YELLOW)%-15s$(NC) %s\n" "TARGET_OCP_VERSION" "Exact OCP target for pinned ARO flow (default: $(TARGET_OCP_VERSION))"
 
 $(TOOLS_DIR):
 	@mkdir -p "$@"
@@ -138,6 +140,7 @@ version: check-tools ## Show Makefile configuration
 	@echo "  Registry/KV:   $(REGISTRY)"
 	@echo "  Release Image: $(RELEASE_IMAGE)"
 	@echo "  Tools Dir:     $(TOOLS_DIR)"
+	@echo "  Target OCP:    $(TARGET_OCP_VERSION)"
 
 azure-service-principal: check-az-subscription ## Ensure ~/.azure/osServicePrincipal.json exists from Key Vault
 	@if [ -f "$$HOME/.azure/osServicePrincipal.json" ]; then \
@@ -283,6 +286,9 @@ cluster-info: ## Display self-managed cluster access information
 prereqs: ## Run local/Azure prerequisite checks
 	@./scripts/00-prereqs.sh
 
+check-upgrade-target: check-az-subscription ## Verify exact TARGET_OCP_VERSION is available before creating ARO
+	@TARGET_OCP_VERSION=$(TARGET_OCP_VERSION) LOCATION=$(LOCATION) ./scripts/02a-check-upgrade-target.sh
+
 aro-up: check-az-subscription .pullsecret ## Create an ARO validation cluster with a randomized resource group unless RESOURCEGROUP is set
 	@set -euo pipefail; \
 	if [ -f "$(ARO_STATE_FILE)" ] && [ "$(ARO_STATE_OVERWRITE)" != "true" ]; then \
@@ -322,6 +328,9 @@ aro-login: check-az-subscription check-oc-command ## Log in to the ARO cluster f
 	password=$$(az aro list-credentials --resource-group "$$RESOURCEGROUP" --name "$$cluster" --query kubeadminPassword -o tsv); \
 	oc login "$$api_server" -u "$$username" -p "$$password"; \
 	echo "$(GREEN)[OK] Logged in to $$cluster$(NC)"
+
+aro-disable-machineset-reconcile: ## Disable ARO MachineSet reconciliation for custom MSHV MachineSets
+	@./scripts/02b-aro-disable-machineset-reconcile.sh
 
 aro-down: check-az-subscription ## Delete the ARO cluster and resource group from local ARO state
 	@set -euo pipefail; \
@@ -375,6 +384,51 @@ upgrade-to-4.22: ## Upgrade current cluster one minor at a time until OCP 4.22
 	done; \
 	echo "$(GREEN)[OK] Cluster is at OCP $$current$(NC)"
 
+upgrade-to-4.22.4: ## Upgrade current cluster exactly to OCP 4.22.4
+	@set -euo pipefail; \
+	target_version='4.22.4'; \
+	if ! [[ "$$target_version" =~ ^4\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$$ ]]; then \
+		echo "$(RED)Error: TARGET_OCP_VERSION must be an exact OCP version, got '$$target_version'.$(NC)"; \
+		exit 1; \
+	fi; \
+	override_rg="$${RESOURCEGROUP:-}"; \
+	override_cluster="$${CLUSTER:-}"; \
+	override_location="$${LOCATION:-}"; \
+	if [ -f "$(ARO_STATE_FILE)" ]; then set -a; source "$(ARO_STATE_FILE)"; set +a; fi; \
+	if [ -n "$$override_rg" ]; then RESOURCEGROUP="$$override_rg"; fi; \
+	if [ -n "$$override_cluster" ]; then CLUSTER="$$override_cluster"; fi; \
+	if [ -n "$$override_location" ]; then LOCATION="$$override_location"; fi; \
+	current=$$(oc get clusterversion version -o jsonpath='{.status.history[0].version}'); \
+	state=$$(oc get clusterversion version -o jsonpath='{.status.history[0].state}'); \
+	if [ "$$state" != "Completed" ]; then \
+		echo "$(RED)Error: ClusterVersion state is $$state for version $$current. Wait for the upgrade to complete before continuing.$(NC)"; \
+		exit 1; \
+	fi; \
+	current_minor=$$(printf '%s' "$$current" | cut -d. -f2); \
+	target_minor=$$(printf '%s' "$$target_version" | cut -d. -f2); \
+	if ! [[ "$$current_minor" =~ ^[0-9]+$$ && "$$target_minor" =~ ^[0-9]+$$ ]]; then \
+		echo "$(RED)Error: Could not parse current or target OCP minor. current=$$current target=$$target_version$(NC)"; \
+		exit 1; \
+	fi; \
+	while [ "$$current_minor" -lt "$$target_minor" ]; do \
+		next=$$((current_minor + 1)); \
+		if [ "$$next" -eq "$$target_minor" ]; then \
+			RESOURCEGROUP="$${RESOURCEGROUP:-}" CLUSTER="$${CLUSTER:-}" LOCATION="$${LOCATION:-}" ./scripts/02-upgrade-cluster.sh "$$target_version"; \
+		else \
+			RESOURCEGROUP="$${RESOURCEGROUP:-}" CLUSTER="$${CLUSTER:-}" LOCATION="$${LOCATION:-}" ./scripts/02-upgrade-cluster.sh "4.$$next"; \
+		fi; \
+		current=$$(oc get clusterversion version -o jsonpath='{.status.history[0].version}'); \
+		state=$$(oc get clusterversion version -o jsonpath='{.status.history[0].state}'); \
+		if [ "$$state" != "Completed" ]; then \
+			echo "$(RED)Error: ClusterVersion state is $$state for version $$current. Wait for the upgrade to complete before continuing.$(NC)"; \
+			exit 1; \
+		fi; \
+		current_minor=$$(printf '%s' "$$current" | cut -d. -f2); \
+	done; \
+	if [ "$$current" != "$$target_version" ]; then \
+		RESOURCEGROUP="$${RESOURCEGROUP:-}" CLUSTER="$${CLUSTER:-}" LOCATION="$${LOCATION:-}" ./scripts/02-upgrade-cluster.sh "$$target_version"; \
+	fi
+
 techpreview: ## Enable and verify TechPreviewNoUpgrade
 	@./scripts/03-techpreview-setup.sh
 
@@ -394,9 +448,11 @@ validation-checkup: ## Run ocp-virt-validation-checkup
 	@QUAY_PULLSECRET_FILE="$(QUAY_PULLSECRET)" TEST_SUITES=$(TEST_SUITES) STORAGE_CLASS=$(STORAGE_CLASS) ./scripts/08-cnv-validation-checkup.sh
 
 aro-validation-flow: ## Run the full ARO validation flow sequentially
+	@TARGET_OCP_VERSION=4.22.4 $(MAKE) check-upgrade-target
 	@$(MAKE) aro-up
 	@$(MAKE) aro-login
-	@$(MAKE) upgrade-to-4.22
+	@$(MAKE) aro-disable-machineset-reconcile
+	@$(MAKE) upgrade-to-4.22.4
 	@$(MAKE) techpreview
 	@$(MAKE) mshv-node
 	@$(MAKE) cnv-pull-secret

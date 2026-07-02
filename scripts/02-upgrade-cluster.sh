@@ -3,9 +3,10 @@
 # 02-upgrade-cluster.sh - Upgrade ARO/OCP cluster one minor version at a time
 #
 # Usage:
-#   ./scripts/02-upgrade-cluster.sh <target-minor>
+#   ./scripts/02-upgrade-cluster.sh <target-minor-or-version>
 #   e.g. ./scripts/02-upgrade-cluster.sh 4.21
 #        ./scripts/02-upgrade-cluster.sh 4.22
+#        ./scripts/02-upgrade-cluster.sh 4.22.4
 #
 # Uses the candidate-X.Y channel to access pre-GA / tech-preview builds.
 # Only allows N -> N+1 minor upgrades (refuses skip-level).
@@ -16,7 +17,26 @@
 # =============================================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+_incoming_resourcegroup="${RESOURCEGROUP:-}"
+_incoming_cluster="${CLUSTER:-}"
+_incoming_location="${LOCATION:-}"
+
 source "${SCRIPT_DIR}/env.sh"
+
+ARO_STATE_FILE="${ARO_STATE_FILE:-${_REPO_ROOT}/.aro.env}"
+if [[ -f "${ARO_STATE_FILE}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${ARO_STATE_FILE}"
+    set +a
+    export RESOURCEGROUP CLUSTER LOCATION
+fi
+
+[[ -n "${_incoming_resourcegroup}" ]] && RESOURCEGROUP="${_incoming_resourcegroup}"
+[[ -n "${_incoming_cluster}" ]] && CLUSTER="${_incoming_cluster}"
+[[ -n "${_incoming_location}" ]] && LOCATION="${_incoming_location}"
+export RESOURCEGROUP CLUSTER LOCATION
 
 for cmd in oc jq curl; do
     check_command "$cmd" || exit 1
@@ -25,12 +45,17 @@ done
 # -----------------------------------------------
 # 0. Argument parsing
 # -----------------------------------------------
-if [[ $# -ne 1 ]] || ! [[ "$1" =~ ^4\.[0-9]+$ ]]; then
-    log_error "Usage: $0 <target-minor>  (e.g. 4.21)"
+if [[ $# -ne 1 ]] || ! [[ "$1" =~ ^4\.[0-9]+(\.[0-9]+(-(ec|rc)\.[0-9]+)?)?$ ]]; then
+    log_error "Usage: $0 <target-minor-or-version>  (e.g. 4.21 or 4.22.4)"
     exit 1
 fi
 
-TARGET_MINOR="$1"
+TARGET_INPUT="$1"
+TARGET_MINOR="$(printf '%s' "${TARGET_INPUT}" | cut -d. -f1-2)"
+TARGET_EXACT_VERSION=""
+if [[ "${TARGET_INPUT}" =~ ^4\.[0-9]+\.[0-9]+(-(ec|rc)\.[0-9]+)?$ ]]; then
+    TARGET_EXACT_VERSION="${TARGET_INPUT}"
+fi
 TARGET_MAJOR="${TARGET_MINOR%%.*}"
 TARGET_MINOR_NUM="${TARGET_MINOR#*.}"
 
@@ -43,25 +68,52 @@ echo "============================================="
 # -----------------------------------------------
 log_info "Checking current cluster version..."
 CURRENT_VERSION=$(oc get clusterversion version -o jsonpath='{.status.desired.version}')
+CURRENT_STATE=$(oc get clusterversion version -o jsonpath='{.status.history[0].state}' 2>/dev/null || echo "")
+CURRENT_HISTORY_VERSION=$(oc get clusterversion version -o jsonpath='{.status.history[0].version}' 2>/dev/null || echo "")
 CURRENT_MAJOR="${CURRENT_VERSION%%.*}"
 # Extract minor: 4.20.15 -> 20
 CURRENT_MINOR_NUM=$(echo "$CURRENT_VERSION" | cut -d. -f2)
 
 log_info "Current version: $CURRENT_VERSION"
-log_info "Target minor:    $TARGET_MINOR"
+if [[ -n "${TARGET_EXACT_VERSION}" ]]; then
+    log_info "Target version:  $TARGET_EXACT_VERSION"
+else
+    log_info "Target minor:    $TARGET_MINOR"
+fi
+
+if [[ -n "${TARGET_EXACT_VERSION}" && "${CURRENT_STATE}" == "Completed" && "${CURRENT_HISTORY_VERSION}" == "${TARGET_EXACT_VERSION}" ]]; then
+    log_ok "Cluster is already at exact target ${TARGET_EXACT_VERSION}."
+    exit 0
+fi
+
+if [[ -n "${TARGET_EXACT_VERSION}" && "${CURRENT_VERSION}" == "${TARGET_EXACT_VERSION}" && "${CURRENT_STATE}" != "Completed" ]]; then
+    log_error "Cluster desired version is ${TARGET_EXACT_VERSION}, but upgrade state is ${CURRENT_STATE:-<unknown>}."
+    log_error "Wait for the current upgrade to complete before continuing to TechPreview/MSHV phases."
+    exit 1
+fi
+
+if [[ -n "${TARGET_EXACT_VERSION}" ]] && printf '%s\n%s\n' "${TARGET_EXACT_VERSION}" "${CURRENT_VERSION}" | sort -V -C; then
+    log_error "Current version ${CURRENT_VERSION} is newer than exact target ${TARGET_EXACT_VERSION}."
+    log_error "This pinned flow will not downgrade or fall back to another ${TARGET_MINOR}.x version."
+    exit 1
+fi
 
 if [[ "$TARGET_MAJOR" != "$CURRENT_MAJOR" ]]; then
     log_error "Major version mismatch: current=$CURRENT_MAJOR, target=$TARGET_MAJOR"
     exit 1
 fi
 
-EXPECTED_MINOR=$((CURRENT_MINOR_NUM + 1))
-if [[ "$TARGET_MINOR_NUM" -ne "$EXPECTED_MINOR" ]]; then
-    log_error "Only N -> N+1 minor upgrades allowed."
-    log_error "Current minor: $CURRENT_MINOR_NUM, target minor: $TARGET_MINOR_NUM, expected: $EXPECTED_MINOR"
-    exit 1
+if [[ -n "${TARGET_EXACT_VERSION}" && "$TARGET_MINOR_NUM" -eq "$CURRENT_MINOR_NUM" ]]; then
+    log_ok "Patch update within current minor validated: ${CURRENT_MAJOR}.${CURRENT_MINOR_NUM} -> ${TARGET_EXACT_VERSION}"
+else
+    EXPECTED_MINOR=$((CURRENT_MINOR_NUM + 1))
+    if [[ "$TARGET_MINOR_NUM" -ne "$EXPECTED_MINOR" ]]; then
+        log_error "Only same-minor patch updates or N -> N+1 minor upgrades are allowed."
+        log_error "Current minor: $CURRENT_MINOR_NUM, target minor: $TARGET_MINOR_NUM, expected: $CURRENT_MINOR_NUM or $EXPECTED_MINOR"
+        exit 1
+    fi
+    log_ok "Hop validated: ${CURRENT_MAJOR}.${CURRENT_MINOR_NUM} -> ${TARGET_MINOR}"
 fi
-log_ok "Hop validated: ${CURRENT_MAJOR}.${CURRENT_MINOR_NUM} -> ${TARGET_MINOR}"
 
 # -----------------------------------------------
 # 2. Pre-flight health check
@@ -75,7 +127,6 @@ fi
 log_ok "Logged in as: $(oc whoami)"
 
 # Check no upgrade in progress
-CURRENT_STATE=$(oc get clusterversion version -o jsonpath='{.status.history[0].state}')
 if [[ "$CURRENT_STATE" == "Partial" ]]; then
     log_error "An upgrade is already in progress (state=Partial). Wait for it to complete."
     exit 1
@@ -152,8 +203,9 @@ log_info "Resolving known upgrade blockers..."
 
 # cloud-credential upgradeable annotation
 log_info "  Setting cloud-credential upgradeable-to annotation..."
+UPGRADEABLE_TO_VERSION="${TARGET_EXACT_VERSION:-${TARGET_MINOR}.0}"
 oc annotate cloudcredential cluster \
-    "cloudcredential.openshift.io/upgradeable-to=${TARGET_MINOR}.0" \
+    "cloudcredential.openshift.io/upgradeable-to=${UPGRADEABLE_TO_VERSION}" \
     --overwrite 2>/dev/null || log_warn "  Could not annotate cloudcredential (may not exist)."
 
 # Admin acks in openshift-config/admin-acks configmap
@@ -186,7 +238,6 @@ if [[ "$UPGRADEABLE" != "True" ]]; then
         -o jsonpath='{.status.conditions[?(@.type=="Upgradeable")].message}' 2>/dev/null || echo "unknown")
     log_warn "Upgradeable is still False after admin-ack resolution."
     log_warn "Reason: $UPGRADE_MSG"
-    log_warn "Will proceed with --force flag."
 fi
 
 # -----------------------------------------------
@@ -209,7 +260,41 @@ CONDITIONAL=$(oc get clusterversion version -o json \
 # Prefer available, fall back to conditional
 USE_NOT_RECOMMENDED=""
 FORCE_FLAG=""
-if [[ -n "$AVAILABLE" ]]; then
+if [[ -n "${TARGET_EXACT_VERSION}" ]]; then
+    if echo "$AVAILABLE" | grep -Fxq "${TARGET_EXACT_VERSION}"; then
+        TARGET_VERSION="${TARGET_EXACT_VERSION}"
+        log_ok "Selected exact target from availableUpdates: $TARGET_VERSION"
+    elif echo "$CONDITIONAL" | grep -Fxq "${TARGET_EXACT_VERSION}"; then
+        TARGET_VERSION="${TARGET_EXACT_VERSION}"
+        USE_NOT_RECOMMENDED="--allow-not-recommended"
+        log_warn "Selected exact target from conditionalUpdates (not recommended): $TARGET_VERSION"
+        RISKS=$(oc get clusterversion version -o json \
+            | jq -r --arg v "$TARGET_VERSION" \
+            '(.status.conditionalUpdates // [])[] | select(.release.version==$v) | .conditions[]? | "\(.type): \(.message)"' 2>/dev/null || echo "unknown")
+        if [[ -n "$RISKS" ]]; then
+            log_warn "Conditional update risks:"
+            echo "$RISKS" | while IFS= read -r line; do log_warn "  $line"; done
+        fi
+    else
+        log_warn "Exact target ${TARGET_EXACT_VERSION} not found in cluster's available/conditional updates."
+        log_warn "Querying Red Hat update graph API for candidate-${TARGET_MINOR}..."
+        GRAPH_JSON=$(curl -sS "https://api.openshift.com/api/upgrades_info/v1/graph?channel=candidate-${TARGET_MINOR}&arch=amd64" 2>/dev/null || echo "{}")
+        GRAPH_TARGET=$(echo "$GRAPH_JSON" | jq -r --arg target "${TARGET_EXACT_VERSION}" \
+            '.nodes[] | select(.version == $target) | [.version, .payload] | @tsv' 2>/dev/null \
+            | head -n1 || echo "")
+        TARGET_VERSION="$(printf '%s' "$GRAPH_TARGET" | cut -f1)"
+        TARGET_IMAGE="$(printf '%s' "$GRAPH_TARGET" | cut -f2)"
+        if [[ -z "$TARGET_VERSION" || -z "$TARGET_IMAGE" ]]; then
+            log_error "Exact target ${TARGET_EXACT_VERSION} was not found in cluster updates or candidate-${TARGET_MINOR} graph."
+            log_error "This flow is pinned and will not fall back to another ${TARGET_MINOR}.x version."
+            exit 1
+        fi
+        USE_TO_IMAGE=true
+        log_warn "Found exact target ${TARGET_VERSION} in update graph (no direct edge from current version)."
+        log_warn "Will use --to-image with --allow-explicit-upgrade to force the upgrade."
+        log_warn "Release image: ${TARGET_IMAGE}"
+    fi
+elif [[ -n "$AVAILABLE" ]]; then
     TARGET_VERSION=$(echo "$AVAILABLE" | tail -1)
     log_ok "Selected from availableUpdates: $TARGET_VERSION"
 elif [[ -n "$CONDITIONAL" ]]; then
@@ -265,7 +350,45 @@ if [[ "${USE_TO_IMAGE:-false}" == "true" ]] && ! [[ "${TARGET_IMAGE}" =~ ^[^[:sp
     exit 1
 fi
 
+if oc get crd clusters.aro.openshift.io &>/dev/null && [[ -n "${RESOURCEGROUP:-}" && -n "${CLUSTER:-}" ]]; then
+    check_command az || exit 1
+    log_info "Verifying Azure ARO resource matches the logged-in API server..."
+    OC_SERVER="$(oc whoami --show-server 2>/dev/null || echo '')"
+    ARO_SERVER="$(az aro show --resource-group "${RESOURCEGROUP}" --name "${CLUSTER}" --query apiserverProfile.url -o tsv 2>/dev/null || echo '')"
+    OC_SERVER="${OC_SERVER%/}"
+    ARO_SERVER="${ARO_SERVER%/}"
+    if [[ -z "${ARO_SERVER}" || "${ARO_SERVER}" != "${OC_SERVER}" ]]; then
+        log_error "Azure ARO resource ${RESOURCEGROUP}/${CLUSTER} does not match the logged-in cluster."
+        log_error "  oc server:  ${OC_SERVER:-<unknown>}"
+        log_error "  aro server: ${ARO_SERVER:-<unknown>}"
+        log_error "Set RESOURCEGROUP and CLUSTER or update ${ARO_STATE_FILE}."
+        exit 1
+    fi
+    log_info "Setting ARO managed-identity upgradeable-to annotation for ${TARGET_VERSION}..."
+    az aro update --resource-group "${RESOURCEGROUP}" --name "${CLUSTER}" --upgradeable-to "${TARGET_VERSION}" --output none
+    log_ok "ARO upgradeable-to set to ${TARGET_VERSION}."
+
+    log_info "Re-checking Upgradeable condition after ARO managed-identity prep..."
+    UPGRADEABLE=""
+    UPGRADE_WAIT=0
+    while [[ $UPGRADE_WAIT -lt 60 ]]; do
+        UPGRADEABLE=$(oc get clusterversion version \
+            -o jsonpath='{.status.conditions[?(@.type=="Upgradeable")].status}' 2>/dev/null || echo "")
+        if [[ "$UPGRADEABLE" == "True" ]]; then
+            log_ok "Cluster is Upgradeable after ARO prep."
+            break
+        fi
+        sleep 10
+        UPGRADE_WAIT=$((UPGRADE_WAIT + 10))
+    done
+fi
+
 if [[ "$UPGRADEABLE" != "True" ]]; then
+    UPGRADE_MSG=$(oc get clusterversion version \
+        -o jsonpath='{.status.conditions[?(@.type=="Upgradeable")].message}' 2>/dev/null || echo "unknown")
+    log_warn "Upgradeable is still False."
+    log_warn "Reason: $UPGRADE_MSG"
+    log_warn "Will proceed with --force flag."
     FORCE_FLAG="--force"
 fi
 
