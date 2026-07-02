@@ -8,7 +8,7 @@
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- Local overrides ---
-if [[ -f "${_REPO_ROOT}/.env" ]]; then
+if [[ "${SKIP_REPO_ENV:-false}" != "true" && -f "${_REPO_ROOT}/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
   source "${_REPO_ROOT}/.env"

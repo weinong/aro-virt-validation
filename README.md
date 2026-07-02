@@ -98,6 +98,12 @@ SELF_MANAGED_BASE_DOMAIN=<base-domain> SELF_MANAGED_BASE_DOMAIN_RESOURCE_GROUP=<
 
 ## ARO
 
+Pre-check that the pinned upgrade target exists before creating a cluster:
+
+```sh
+make check-upgrade-target
+```
+
 Create the cluster:
 
 ```sh

@@ -46,7 +46,7 @@ NC     := $(shell printf '\033[0m')
 	upload-cluster-credential download-cluster-credential cluster-info \
 	ocp-up ocp-down \
 	upload-quay-pullsecret refresh-quay-pullsecret upload-pull-secret upload-local-secrets download-local-secrets \
-	prereqs aro-up aro-login aro-disable-machineset-reconcile aro-down upgrade-4.21 upgrade-4.22 upgrade-to-4.22 upgrade-to-4.22.4 techpreview mshv-node cnv-pull-secret \
+	prereqs check-upgrade-target aro-up aro-login aro-disable-machineset-reconcile aro-down upgrade-4.21 upgrade-4.22 upgrade-to-4.22 upgrade-to-4.22.4 techpreview mshv-node cnv-pull-secret \
 	cnv-install mshv-hco-patch validation-checkup aro-validation-flow ocp-validation-flow
 
 .NOTPARALLEL: aro-validation-flow ocp-validation-flow
@@ -286,6 +286,9 @@ cluster-info: ## Display self-managed cluster access information
 prereqs: ## Run local/Azure prerequisite checks
 	@./scripts/00-prereqs.sh
 
+check-upgrade-target: check-az-subscription ## Verify exact TARGET_OCP_VERSION is available before creating ARO
+	@TARGET_OCP_VERSION=$(TARGET_OCP_VERSION) LOCATION=$(LOCATION) ./scripts/02a-check-upgrade-target.sh
+
 aro-up: check-az-subscription .pullsecret ## Create an ARO validation cluster with a randomized resource group unless RESOURCEGROUP is set
 	@set -euo pipefail; \
 	if [ -f "$(ARO_STATE_FILE)" ] && [ "$(ARO_STATE_OVERWRITE)" != "true" ]; then \
@@ -445,6 +448,7 @@ validation-checkup: ## Run ocp-virt-validation-checkup
 	@QUAY_PULLSECRET_FILE="$(QUAY_PULLSECRET)" TEST_SUITES=$(TEST_SUITES) STORAGE_CLASS=$(STORAGE_CLASS) ./scripts/08-cnv-validation-checkup.sh
 
 aro-validation-flow: ## Run the full ARO validation flow sequentially
+	@TARGET_OCP_VERSION=4.22.4 $(MAKE) check-upgrade-target
 	@$(MAKE) aro-up
 	@$(MAKE) aro-login
 	@$(MAKE) aro-disable-machineset-reconcile
