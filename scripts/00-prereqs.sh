@@ -119,7 +119,7 @@ fi
 # -----------------------------------------------
 log_info "Checking Ddsv6 family vCPU quota in $LOCATION..."
 MSHV_QUOTA_INFO=$(az vm list-usage -l "$LOCATION" \
-    --query "[?contains(name.value, 'standardDDSv6Family') || contains(name.value, 'standardDdsv6Family')]" -o json 2>/dev/null)
+    --query "[?name.value == 'StandardDdsv6Family']" -o json 2>/dev/null)
 
 MSHV_CURRENT_USAGE=$(echo "$MSHV_QUOTA_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['currentValue'] if d else 0)" 2>/dev/null || echo "0")
 MSHV_LIMIT=$(echo "$MSHV_QUOTA_INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['limit'] if d else 0)" 2>/dev/null || echo "0")
