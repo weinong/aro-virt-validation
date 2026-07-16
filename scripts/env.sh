@@ -70,6 +70,76 @@ log_ok() { echo -e "\033[0;32m[OK]\033[0m    $*"; }
 log_warn() { echo -e "\033[0;33m[WARN]\033[0m  $*"; }
 log_error() { echo -e "\033[0;31m[ERROR]\033[0m $*"; }
 
+show_machine_config_pool_diagnostics() {
+  local request_timeout="${MCP_REQUEST_TIMEOUT_SECONDS:-30}"
+  oc get mcp -o wide --request-timeout="${request_timeout}s" || true
+  oc get nodes -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,CURRENT:.metadata.annotations.machineconfiguration\.openshift\.io/currentConfig,DESIRED:.metadata.annotations.machineconfiguration\.openshift\.io/desiredConfig,STATE:.metadata.annotations.machineconfiguration\.openshift\.io/state,REASON:.metadata.annotations.machineconfiguration\.openshift\.io/reason' --request-timeout="${request_timeout}s" || true
+}
+
+wait_for_machine_config_pools() {
+  local timeout="${MCP_UPDATE_TIMEOUT_SECONDS:-1800}"
+  local poll_interval="${MCP_UPDATE_POLL_SECONDS:-15}"
+  local request_timeout="${MCP_REQUEST_TIMEOUT_SECONDS:-30}"
+  local start_time elapsed remaining current_request_timeout sleep_seconds pools degraded not_updated="unknown"
+
+  if ! [[ "${timeout}" =~ ^[1-9][0-9]*$ && "${poll_interval}" =~ ^[1-9][0-9]*$ && "${request_timeout}" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "MCP update timeout, poll interval, and request timeout must be positive integers."
+    return 1
+  fi
+
+  start_time=$(date +%s)
+  while true; do
+    elapsed=$(($(date +%s) - start_time))
+    remaining=$((timeout - elapsed))
+    if (( remaining <= 0 )); then
+      log_error "MachineConfigPools did not become Updated within ${timeout}s: ${not_updated//$'\n'/, }."
+      show_machine_config_pool_diagnostics
+      return 1
+    fi
+
+    current_request_timeout="${request_timeout}"
+    (( current_request_timeout > remaining )) && current_request_timeout="${remaining}"
+    if ! pools=$(oc get mcp master worker -o json --request-timeout="${current_request_timeout}s"); then
+      log_error "Could not retrieve MachineConfigPool status."
+      show_machine_config_pool_diagnostics
+      return 1
+    fi
+
+    if ! degraded=$(jq -er '[.items[] | select(any(.status.conditions[]; .type == "Degraded" and .status == "True")) | [.metadata.name, ([.status.conditions[] | select(.type == "Degraded") | .message][0] // "no reason reported")] | @tsv] | join("\n")' <<< "${pools}") ||
+       ! not_updated=$(jq -er '[.items[] | select(any(.status.conditions[]; .type == "Updated" and .status == "True") | not) | .metadata.name] | join("\n")' <<< "${pools}"); then
+      log_error "Could not evaluate MachineConfigPool status."
+      show_machine_config_pool_diagnostics
+      return 1
+    fi
+
+    if [[ -n "${degraded}" ]]; then
+      while IFS=$'\t' read -r pool message; do
+        log_error "MachineConfigPool ${pool} is Degraded: ${message}"
+      done <<< "${degraded}"
+      show_machine_config_pool_diagnostics
+      return 1
+    fi
+
+    elapsed=$(($(date +%s) - start_time))
+    if (( elapsed >= timeout )); then
+      log_error "MachineConfigPools did not become Updated within ${timeout}s: ${not_updated//$'\n'/, }."
+      show_machine_config_pool_diagnostics
+      return 1
+    fi
+
+    if [[ -z "${not_updated}" ]]; then
+      log_ok "MachineConfigPools are Updated."
+      return 0
+    fi
+
+    log_info "Waiting for MachineConfigPools to update (${elapsed}s / ${timeout}s): ${not_updated//$'\n'/, }"
+    remaining=$((timeout - elapsed))
+    sleep_seconds="${poll_interval}"
+    (( sleep_seconds > remaining )) && sleep_seconds="${remaining}"
+    sleep "${sleep_seconds}"
+  done
+}
+
 check_command() {
   if ! command -v "$1" &>/dev/null; then
     log_error "Required command '$1' not found. Please install it first."

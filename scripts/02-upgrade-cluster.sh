@@ -148,12 +148,8 @@ if [[ -n "$UNAVAILABLE_COS" ]]; then
 fi
 log_ok "All ClusterOperators are Available."
 
-# Check MCPs
-if ! oc wait mcp master worker --for=condition=Updated --timeout=30s &>/dev/null; then
-    log_error "MachineConfigPools are not Updated. Wait for current rollout to finish."
-    exit 1
-fi
-log_ok "MachineConfigPools are Updated."
+# Wait for normal MachineConfig rollouts, but stop immediately on degradation.
+wait_for_machine_config_pools || exit 1
 
 # -----------------------------------------------
 # 3. Capture pre-upgrade snapshot
