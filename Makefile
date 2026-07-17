@@ -88,16 +88,18 @@ $(OC): $(OC_STAMP)
 	@:
 
 $(OC_STAMP): | $(TOOLS_DIR) check-oc-command
+	@$(MAKE) .pullsecret
 	@echo "$(YELLOW)Extracting oc from $(RELEASE_IMAGE)...$(NC)"
-	@oc adm release extract --command=oc --from=$(RELEASE_IMAGE) --to $(TOOLS_DIR)
+	@oc adm release extract --registry-config=.pullsecret --command=oc --from=$(RELEASE_IMAGE) --to $(TOOLS_DIR)
 	@chmod +x "$(OC)"
 	@rm -f $(TOOLS_DIR)/.oc.*.stamp
 	@touch -r "$(OC)" "$(OC_STAMP)"
 	@echo "$(GREEN)[OK] Extracted oc to $(TOOLS_DIR)/$(NC)"
 
 $(OPENSHIFT_INSTALL_STAMP): | $(TOOLS_DIR) check-oc-command
+	@$(MAKE) .pullsecret
 	@echo "$(YELLOW)Extracting openshift-install from $(RELEASE_IMAGE)...$(NC)"
-	@oc adm release extract --command=openshift-install --from=$(RELEASE_IMAGE) --to $(TOOLS_DIR) || \
+	@oc adm release extract --registry-config=.pullsecret --command=openshift-install --from=$(RELEASE_IMAGE) --to $(TOOLS_DIR) || \
 		(echo "$(RED)Error: Could not extract openshift-install from release image$(NC)" && exit 1)
 	@chmod +x "$(OPENSHIFT_INSTALL)"
 	@rm -f $(TOOLS_DIR)/.openshift-install.*.stamp
@@ -159,8 +161,11 @@ azure-service-principal: check-az-subscription ## Ensure ~/.azure/osServicePrinc
 
 .pullsecret: | check-az-subscription ## Download self-managed pull secret from Azure Key Vault
 	@echo "$(YELLOW)Pull secret file not found. Retrieving from Azure Key Vault...$(NC)"
-	@if az keyvault secret show --name ocp-pullsecret --vault-name $(REGISTRY) --query value -o tsv > ".pullsecret"; then \
-		chmod 600 ".pullsecret"; \
+	@tmp_file=$$(mktemp .pullsecret.XXXXXX); \
+	trap 'rm -f "$$tmp_file"' EXIT; \
+	if az keyvault secret show --name ocp-pullsecret --vault-name $(REGISTRY) --query value -o tsv > "$$tmp_file"; then \
+		mv "$$tmp_file" ".pullsecret"; \
+		trap - EXIT; \
 		echo "$(GREEN)[OK] Pull secret file created: .pullsecret$(NC)"; \
 	else \
 		echo "$(RED)Error: Failed to retrieve ocp-pullsecret from Azure Key Vault.$(NC)"; \
