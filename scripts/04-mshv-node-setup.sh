@@ -161,6 +161,8 @@ fi
 log_info "Creating MSHV MachineSet ${MSHV_MACHINESET_NAME}..."
 if oc get machineset.machine.openshift.io "${MSHV_MACHINESET_NAME}" -n openshift-machine-api &>/dev/null; then
   log_ok "MachineSet ${MSHV_MACHINESET_NAME} already exists."
+  oc patch machineset.machine.openshift.io "${MSHV_MACHINESET_NAME}" -n openshift-machine-api --type=merge \
+    -p '{"spec":{"template":{"spec":{"metadata":{"labels":{"node-role.kubernetes.io/mshv":"","node-role.kubernetes.io/worker":""}}}}}}'
   oc scale machineset.machine.openshift.io "${MSHV_MACHINESET_NAME}" -n openshift-machine-api --replicas="${MSHV_REPLICAS}"
 else
   oc get machineset.machine.openshift.io "${EXISTING_MS}" -n openshift-machine-api -o json \
@@ -186,7 +188,8 @@ else
         "platformsettings.host_environment.nodefeatures.hierarchicalvirtualizationv1": "True"
       }) |
       .spec.template.spec.metadata.labels = {
-        "node-role.kubernetes.io/mshv": ""
+        "node-role.kubernetes.io/mshv": "",
+        "node-role.kubernetes.io/worker": ""
       }
     ' | oc apply -f -
 fi
@@ -226,12 +229,12 @@ if [[ "$(oc get node "${NODE_NAME}" -o json | jq -r '.metadata.labels | has("nod
   oc get node "${NODE_NAME}" --show-labels
   exit 1
 fi
-if [[ "$(oc get node "${NODE_NAME}" -o json | jq -r '.metadata.labels | has("node-role.kubernetes.io/worker")')" == "true" ]]; then
-  log_error "MSHV node still has the worker role label. Fix the MachineSet labels instead of editing the node manually."
+if [[ "$(oc get node "${NODE_NAME}" -o json | jq -r '.metadata.labels | has("node-role.kubernetes.io/worker")')" != "true" ]]; then
+  log_error "MSHV node is missing node-role.kubernetes.io/worker label required by custom MachineConfigPools."
   oc get node "${NODE_NAME}" --show-labels
   exit 1
 fi
-log_ok "MSHV node labels are isolated from worker role."
+log_ok "MSHV node has the worker and mshv roles required by the custom MachineConfigPool."
 
 log_info "Waiting for mshv MCP to apply RHCOS 10 and module-load config..."
 MCP_TIMEOUT=3600
