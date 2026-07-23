@@ -72,6 +72,8 @@ make ocp-up
 make cluster-info
 ```
 
+`make ocp-up` defaults to stable OCP `4.22.7`, pinned by release image digest.
+
 Run validation phases manually:
 
 ```sh
@@ -89,7 +91,7 @@ Common overrides:
 ```sh
 LOCATION=<azure-region> make ocp-up
 SSH_PUB_KEY=~/.ssh/id_ed25519.pub make ocp-up
-RELEASE_IMAGE=<release-image> make setup-tools
+RELEASE_IMAGE=<release-image> make ocp-up
 SELF_MANAGED_CLUSTER=<cluster-name> make ocp-up
 SELF_MANAGED_BASE_DOMAIN=<base-domain> SELF_MANAGED_BASE_DOMAIN_RESOURCE_GROUP=<dns-rg> make ocp-up
 ```

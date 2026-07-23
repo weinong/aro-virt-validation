@@ -42,11 +42,13 @@ if [[ "$1 $2 $3" != "adm release extract" ]]; then
 fi
 
 command_name=""
+from_image=""
 registry_config=""
 output_dir=""
 while (( $# > 0 )); do
   case "$1" in
     --command=*) command_name="${1#--command=}" ;;
+    --from=*) from_image="${1#--from=}" ;;
     --registry-config=*) registry_config="${1#--registry-config=}" ;;
     --to) output_dir="$2"; shift ;;
   esac
@@ -56,6 +58,10 @@ done
 if [[ -z "${command_name}" || -z "${output_dir}" ]]; then
   printf 'missing command or output directory: %s\n' "$*" >&2
   exit 2
+fi
+if [[ "${from_image}" != "${EXPECTED_FROM}" ]]; then
+  printf 'unexpected release image: %s\n' "${from_image}" >&2
+  exit 3
 fi
 if [[ "${registry_config}" != ".pullsecret" || ! -s "${registry_config}" ]]; then
   printf 'missing registry config .pullsecret\n' >&2
@@ -81,7 +87,9 @@ run_setup_tools() {
     RELEASE_IMAGE=quay.io/example/release@sha256:test
 }
 
-PATH="${TMPDIR}/bin:${PATH}" run_setup_tools setup-tools .pullsecret
+PATH="${TMPDIR}/bin:${PATH}" \
+  EXPECTED_FROM=quay.io/example/release@sha256:test \
+  run_setup_tools setup-tools .pullsecret
 
 test -x "${TMPDIR}/tools/oc"
 test -x "${TMPDIR}/tools/openshift-install"
@@ -89,3 +97,10 @@ test "$(stat -c '%a' "${TMPDIR}/.pullsecret")" = 600
 
 rm "${TMPDIR}/.pullsecret"
 PATH="${TMPDIR}/bin:${PATH}" FAIL_AZ=true run_setup_tools setup-tools
+
+PATH="${TMPDIR}/bin:${PATH}" \
+  EXPECTED_FROM=quay.io/openshift-release-dev/ocp-release@sha256:1a50a7c21acc0b113aa74c187bec8798cb58481c065a4c5a0e25df6bc46b8815 \
+  make -j4 -C "${TMPDIR}" setup-tools \
+    TOOLS_DIR="${TMPDIR}/default-tools" \
+    REGISTRY=test-registry \
+    AZURE_SUBSCRIPTION_NAME=test-subscription
