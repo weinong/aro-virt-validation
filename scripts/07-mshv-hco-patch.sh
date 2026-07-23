@@ -6,6 +6,7 @@
 #   - ConfigurableHypervisor + hyperv-direct hypervisor
 #   - Required feature gates
 #   - evictionStrategy: None
+#   - Workload placement on MSHV nodes
 #
 # NOTE: Do NOT set cpuModel (e.g. qemu64-v1) — it causes a nodeSelector
 # mismatch because virt-handler does not advertise virtual CPU model labels.
@@ -25,7 +26,7 @@ log_info "Verifying cluster login..."
 oc whoami &>/dev/null || { log_error "Not logged in."; exit 1; }
 
 # ---------------------------------------------------------------------------
-# Step 1: Annotate HCO with kubevirt jsonpatch
+# Step 1: Configure HCO and annotate it with the kubevirt jsonpatch
 # ---------------------------------------------------------------------------
 HCO_NAME="$(oc get hco -n openshift-cnv -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
 [[ -z "${HCO_NAME}" ]] && { log_error "No HyperConverged CR found in openshift-cnv."; exit 1; }
@@ -54,6 +55,10 @@ oc annotate hco "${HCO_NAME}" -n openshift-cnv --overwrite \
   "kubevirt.kubevirt.io/jsonpatch=${JSONPATCH}"
 
 log_ok "HCO annotated."
+
+log_info "Restricting virtualization workloads to MSHV nodes..."
+oc patch hco "${HCO_NAME}" -n openshift-cnv --type=merge \
+  -p '{"spec":{"deployment":{"nodePlacements":{"workload":{"nodeSelector":{"node-role.kubernetes.io/mshv":""}}}}}}'
 
 # ---------------------------------------------------------------------------
 # Step 2: Check if KubeVirt CRD supports hypervisors field
@@ -100,12 +105,52 @@ else
   exit 1
 fi
 
+log_info "Verifying workload node placement..."
+TIMEOUT=300
+ELAPSED=0
+while true; do
+  if oc get kubevirt kubevirt-kubevirt-hyperconverged -n openshift-cnv -o json 2>/dev/null \
+    | jq -e '.spec.workloads.nodePlacement.nodeSelector["node-role.kubernetes.io/mshv"] == ""' >/dev/null; then
+    log_ok "Virtualization workloads are restricted to MSHV nodes."
+    break
+  fi
+  if [[ "${ELAPSED}" -ge "${TIMEOUT}" ]]; then
+    log_error "Timeout waiting for KubeVirt workload node placement."
+    exit 1
+  fi
+  sleep 15
+  ELAPSED=$((ELAPSED + 15))
+done
+
 # ---------------------------------------------------------------------------
-# Step 3: Verify virt-handler pods are restarted and ready
+# Step 3: Verify virt-handler placement and readiness
 # ---------------------------------------------------------------------------
+log_info "Waiting for virt-handler workload placement..."
+ELAPSED=0
+while true; do
+  if oc get daemonset/virt-handler -n openshift-cnv -o json 2>/dev/null \
+    | jq -e '.spec.template.spec.nodeSelector["node-role.kubernetes.io/mshv"] == ""' >/dev/null; then
+    break
+  fi
+  if [[ "${ELAPSED}" -ge "${TIMEOUT}" ]]; then
+    log_error "Timeout waiting for virt-handler workload placement."
+    exit 1
+  fi
+  sleep 15
+  ELAPSED=$((ELAPSED + 15))
+done
+
 log_info "Waiting for virt-handler pods to be ready..."
-oc rollout status daemonset/virt-handler -n openshift-cnv --timeout=300s 2>/dev/null || \
-  log_warn "virt-handler rollout did not complete in 300s."
+if ! oc rollout status daemonset/virt-handler -n openshift-cnv --timeout=300s; then
+  log_error "virt-handler rollout did not complete in 300s."
+  exit 1
+fi
+VIRT_HANDLER_STATUS="$(oc get daemonset/virt-handler -n openshift-cnv -o json)"
+if ! jq -e '.status.desiredNumberScheduled > 0 and .status.numberReady == .status.desiredNumberScheduled' \
+  <<< "${VIRT_HANDLER_STATUS}" >/dev/null; then
+  log_error "No ready virt-handler pods are scheduled on MSHV nodes."
+  exit 1
+fi
 
 # Show final config
 log_info "KubeVirt feature gates:"
