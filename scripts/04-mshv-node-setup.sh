@@ -268,9 +268,9 @@ oc debug "node/${NODE_NAME}" -- chroot /host bash -c '
   uname -r
   test -e /dev/mshv
   test -e /dev/vhost-net
-  lsmod | grep -q "^mshv_root"
+  grep -q "^mshv_root" /proc/modules
   test -f /etc/modules-load.d/mshv-root.conf
-  grep -q "running as L1VH partition" /var/log/dmesg 2>/dev/null || dmesg | grep -q "running as L1VH partition"
+  grep -q "running as L1VH partition" /var/log/dmesg 2>/dev/null || dmesg | grep "running as L1VH partition" >/dev/null
 '
 
 log_ok "Phase 4 complete. MSHV node is declaratively configured."

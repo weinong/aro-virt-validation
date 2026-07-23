@@ -65,7 +65,13 @@ case "$*" in
   "get mcp mshv -o jsonpath={.status.conditions[?(@.type==\"Updated\")].status}") printf 'True' ;;
   "get mcp mshv -o jsonpath={.status.conditions[?(@.type==\"Updating\")].status}") printf 'False' ;;
   "get mcp mshv -o jsonpath={.status.conditions[?(@.type==\"Degraded\")].status}") printf 'False' ;;
-  "debug node/mshv-node -- chroot /host bash -c "*) exit 0 ;;
+  "debug node/mshv-node -- chroot /host bash -c "*)
+    [[ "$*" == *'grep -q "^mshv_root" /proc/modules'* ]]
+    [[ "$*" == *'dmesg | grep "running as L1VH partition" >/dev/null'* ]]
+    [[ "$*" != *'lsmod | grep -q'* ]]
+    [[ "$*" != *'dmesg | grep -q'* ]]
+    exit 0
+    ;;
   *) printf 'unexpected oc args: %s\n' "$*" >&2; exit 2 ;;
 esac
 EOF
