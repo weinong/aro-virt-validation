@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="/opt/qemu-upstream/rootfs"
+export QEMU_MODULE_DIR="${root}/usr/lib64/qemu-kvm"
+export QEMU_AUDIO_DRV="none"
+export XDG_CONFIG_DIRS="${root}/etc/xdg"
+export XDG_DATA_DIRS="${root}/usr/share"
+
+exec "${root}/usr/lib64/ld-linux-x86-64.so.2" \
+  --inhibit-cache \
+  --library-path "${root}/usr/lib64" \
+  "${root}/usr/libexec/qemu-kvm" \
+  -L "${root}/usr/share/qemu-kvm" \
+  "$@"

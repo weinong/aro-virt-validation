@@ -153,6 +153,29 @@ TEST_SUITES=compute,network,storage STORAGE_CLASS=managed-csi make validation-ch
 DRY_RUN=true make validation-checkup
 ```
 
+Diagnostic QEMU `10.1.0-17.el9_8.3` validation:
+
+```sh
+USE_QEMU_3_LAUNCHER=true \
+QEMU_3_LAUNCHER_IMAGE=arol1vh.azurecr.io/aro-virt-validation/cnv-qemu-launcher@sha256:7c49c99f1506dce2ed93f7018dc69ed118183a116e4f93011f87dbfcb4b1d1c4 \
+QEMU_3_PULL_SECRET_FILE=/path/to/dockerconfig.json \
+  make validation-checkup
+```
+
+This is an unsupported diagnostic intervention. The override remains active
+after validation completes, fails, or reaches the local `JOB_TIMEOUT`; an
+in-cluster Job may continue naturally. Restore only when explicitly requested:
+
+```sh
+make restore-qemu-3-launcher
+```
+
+The apply operation records cluster/resource identities and the original HCO,
+CSV, and Deployment values under ignored `.smoke-runs/` state. Explicit restore
+refuses stale or concurrent state instead of overwriting it. There is no
+automatic restore, including after a partial apply failure; retain the state
+file and run the explicit restore after resolving any reported drift.
+
 Artifacts are saved under `.checkup-runs/<timestamp>/`.
 
 ## Cleanup

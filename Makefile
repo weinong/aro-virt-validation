@@ -20,6 +20,9 @@ TOOLS_DIR       ?= ocp-tools
 CNV_VERSION     ?= 4.99
 TEST_SUITES     ?= compute,network,storage
 STORAGE_CLASS   ?= managed-csi
+USE_QEMU_3_LAUNCHER ?= false
+QEMU_3_LAUNCHER_IMAGE ?=
+QEMU_3_PULL_SECRET_FILE ?=
 TARGET_OCP_VERSION ?= 4.22.4
 
 # Tool paths
@@ -47,7 +50,7 @@ NC     := $(shell printf '\033[0m')
 	ocp-up ocp-down \
 	upload-quay-pullsecret refresh-quay-pullsecret upload-pull-secret upload-local-secrets download-local-secrets \
 	prereqs check-upgrade-target aro-up aro-login aro-disable-machineset-reconcile aro-down upgrade-4.21 upgrade-4.22 upgrade-to-4.22 upgrade-to-4.22.4 techpreview mshv-node cnv-pull-secret \
-	cnv-install mshv-hco-patch validation-checkup aro-validation-flow ocp-validation-flow
+	cnv-install mshv-hco-patch validation-checkup restore-qemu-3-launcher aro-validation-flow ocp-validation-flow
 
 .NOTPARALLEL: aro-validation-flow ocp-validation-flow
 
@@ -450,7 +453,14 @@ mshv-hco-patch: ## Enable hyperv-direct through HCO annotation
 	@./scripts/07-mshv-hco-patch.sh
 
 validation-checkup: ## Run ocp-virt-validation-checkup
-	@QUAY_PULLSECRET_FILE="$(QUAY_PULLSECRET)" TEST_SUITES=$(TEST_SUITES) STORAGE_CLASS=$(STORAGE_CLASS) ./scripts/08-cnv-validation-checkup.sh
+	@QUAY_PULLSECRET_FILE="$(QUAY_PULLSECRET)" TEST_SUITES=$(TEST_SUITES) STORAGE_CLASS=$(STORAGE_CLASS) \
+		USE_QEMU_3_LAUNCHER="$(USE_QEMU_3_LAUNCHER)" \
+		QEMU_3_LAUNCHER_IMAGE="$(QEMU_3_LAUNCHER_IMAGE)" \
+		QEMU_3_PULL_SECRET_FILE="$(QEMU_3_PULL_SECRET_FILE)" \
+		./scripts/08-cnv-validation-checkup.sh
+
+restore-qemu-3-launcher: ## Explicitly restore the shipped CNV virt-launcher after a QEMU .3 validation run
+	@./scripts/09d-virt-launcher-image-override.sh restore
 
 aro-validation-flow: ## Run the full ARO validation flow sequentially
 	@TARGET_OCP_VERSION=4.22.4 $(MAKE) check-upgrade-target

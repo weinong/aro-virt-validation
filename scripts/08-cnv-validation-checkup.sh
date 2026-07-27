@@ -33,6 +33,9 @@ TEST_SKIPS="${TEST_SKIPS:-}"
 DRY_RUN="${DRY_RUN:-false}"
 FULL_SUITE="${FULL_SUITE:-false}"
 JOB_TIMEOUT="${JOB_TIMEOUT:-7200}"  # seconds (2 hours)
+USE_QEMU_3_LAUNCHER="${USE_QEMU_3_LAUNCHER:-false}"
+QEMU_3_LAUNCHER_IMAGE="${QEMU_3_LAUNCHER_IMAGE:-}"
+QEMU_3_PULL_SECRET_FILE="${QEMU_3_PULL_SECRET_FILE:-}"
 CHECKUP_NS="ocp-virt-validation"
 RESULTS_DIR="${_REPO_ROOT}/.checkup-runs"
 
@@ -48,6 +51,17 @@ check_command jq   || exit 1
 log_info "Verifying cluster login..."
 CURRENT_USER="$(oc whoami 2>/dev/null)" || { log_error "Not logged in to cluster. Run 'oc login' first."; exit 1; }
 log_ok  "Logged in as ${CURRENT_USER}"
+
+if [[ "${USE_QEMU_3_LAUNCHER}" == "true" ]]; then
+  [[ "${DRY_RUN}" != "true" ]] || { log_error "USE_QEMU_3_LAUNCHER=true cannot be combined with DRY_RUN=true."; exit 1; }
+  [[ -n "${QEMU_3_LAUNCHER_IMAGE}" ]] || { log_error "QEMU_3_LAUNCHER_IMAGE is required."; exit 1; }
+  [[ -n "${QEMU_3_PULL_SECRET_FILE}" ]] || { log_error "QEMU_3_PULL_SECRET_FILE is required."; exit 1; }
+  log_warn "Applying the persistent unsupported QEMU .3 launcher override."
+  VIRT_LAUNCHER_IMAGE="${QEMU_3_LAUNCHER_IMAGE}" \
+  VIRT_LAUNCHER_IMAGE_PULL_SECRET_FILE="${QEMU_3_PULL_SECRET_FILE}" \
+    "${SCRIPT_DIR}/09d-virt-launcher-image-override.sh" apply
+  log_warn "The QEMU .3 launcher override remains active after validation exits or times out."
+fi
 
 # ---------------------------------------------------------------------------
 # Extract validation image from the installed CNV CSV
@@ -99,6 +113,7 @@ log_info "  TEST_SKIPS:           ${TEST_SKIPS:-<none>}"
 log_info "  DRY_RUN:              ${DRY_RUN}"
 log_info "  FULL_SUITE:           ${FULL_SUITE}"
 log_info "  JOB_TIMEOUT:          ${JOB_TIMEOUT}s"
+log_info "  USE_QEMU_3_LAUNCHER: ${USE_QEMU_3_LAUNCHER}"
 log_info "-------------------------"
 
 # ---------------------------------------------------------------------------

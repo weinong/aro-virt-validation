@@ -13,3 +13,4 @@ ocp-tools/
 docs/6070641.md
 .checkup-runs/
 .smoke-runs/
+/rpms/

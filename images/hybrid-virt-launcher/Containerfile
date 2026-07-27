@@ -1,0 +1,33 @@
+ARG UPSTREAM_LAUNCHER_IMAGE
+FROM ${UPSTREAM_LAUNCHER_IMAGE} AS upstream-qemu
+
+ARG CNV_LAUNCHER_IMAGE
+FROM ${CNV_LAUNCHER_IMAGE} AS cnv-launcher
+
+USER 0
+
+COPY --from=upstream-qemu /usr/lib64/ /opt/qemu-upstream/rootfs/usr/lib64/
+COPY --from=upstream-qemu /usr/libexec/qemu-kvm /opt/qemu-upstream/rootfs/usr/libexec/qemu-kvm
+COPY --from=upstream-qemu /usr/lib64/qemu-kvm/ /opt/qemu-upstream/rootfs/usr/lib64/qemu-kvm/
+COPY --from=upstream-qemu /usr/share/qemu-kvm/ /opt/qemu-upstream/rootfs/usr/share/qemu-kvm/
+COPY --from=upstream-qemu /usr/share/qemu/ /opt/qemu-upstream/rootfs/usr/share/qemu/
+COPY --from=upstream-qemu /usr/share/OVMF/ /opt/qemu-upstream/rootfs/usr/share/OVMF/
+COPY --from=upstream-qemu /usr/share/edk2/ /opt/qemu-upstream/rootfs/usr/share/edk2/
+COPY --from=upstream-qemu /usr/share/seabios/ /opt/qemu-upstream/rootfs/usr/share/seabios/
+COPY --from=upstream-qemu /usr/share/seavgabios/ /opt/qemu-upstream/rootfs/usr/share/seavgabios/
+COPY --from=upstream-qemu /usr/share/ipxe/ /opt/qemu-upstream/rootfs/usr/share/ipxe/
+COPY --from=upstream-qemu /usr/share/ipxe.efi/ /opt/qemu-upstream/rootfs/usr/share/ipxe.efi/
+COPY --from=upstream-qemu /etc/qemu-kvm/ /opt/qemu-upstream/rootfs/etc/qemu-kvm/
+COPY --from=upstream-qemu /etc/sasl2/qemu-kvm.conf /opt/qemu-upstream/rootfs/etc/sasl2/qemu-kvm.conf
+
+COPY upstream-qemu-kvm /opt/qemu-upstream/bin/qemu-kvm
+
+RUN chmod 0755 /opt/qemu-upstream/bin/qemu-kvm \
+    && test -x /opt/qemu-upstream/rootfs/usr/lib64/ld-linux-x86-64.so.2 \
+    && test -x /opt/qemu-upstream/rootfs/usr/libexec/qemu-kvm \
+    && test -d /opt/qemu-upstream/rootfs/usr/lib64/qemu-kvm \
+    && test -d /opt/qemu-upstream/rootfs/usr/share/qemu-kvm
+
+LABEL io.kubevirt.upstream-qemu.path="/opt/qemu-upstream/bin/qemu-kvm"
+
+ENTRYPOINT ["/usr/bin/virt-launcher-monitor"]
