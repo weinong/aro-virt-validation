@@ -20,10 +20,14 @@ TOOLS_DIR       ?= ocp-tools
 CNV_VERSION     ?= 4.99
 TEST_SUITES     ?= compute,network,storage
 STORAGE_CLASS   ?= managed-csi
+QEMU_RPM_DIR    ?=
+CNV_QEMU_IMAGE  ?= localhost/aro-virt-validation/cnv-qemu-launcher:10.1.0-17.el9_8.3
 USE_QEMU_3_LAUNCHER ?= false
 QEMU_3_LAUNCHER_IMAGE ?=
 QEMU_3_PULL_SECRET_FILE ?=
 TARGET_OCP_VERSION ?= 4.22.4
+
+export QEMU_RPM_DIR CNV_QEMU_IMAGE
 
 # Tool paths
 OC                = $(TOOLS_DIR)/oc
@@ -50,7 +54,7 @@ NC     := $(shell printf '\033[0m')
 	ocp-up ocp-down \
 	upload-quay-pullsecret refresh-quay-pullsecret upload-pull-secret upload-local-secrets download-local-secrets \
 	prereqs check-upgrade-target aro-up aro-login aro-disable-machineset-reconcile aro-down upgrade-4.21 upgrade-4.22 upgrade-to-4.22 upgrade-to-4.22.4 techpreview mshv-node cnv-pull-secret \
-	cnv-install mshv-hco-patch validation-checkup restore-qemu-3-launcher aro-validation-flow ocp-validation-flow
+	cnv-install mshv-hco-patch build-qemu-3-launcher check-qemu-3-publish-image publish-qemu-3-launcher validation-checkup restore-qemu-3-launcher aro-validation-flow ocp-validation-flow
 
 .NOTPARALLEL: aro-validation-flow ocp-validation-flow
 
@@ -79,6 +83,8 @@ help: ## Show this help message
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "CNV_VERSION" "CNV nightly version (default: $(CNV_VERSION))"
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "TEST_SUITES" "Validation suites (default: $(TEST_SUITES))"
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "STORAGE_CLASS" "Validation storage class (default: $(STORAGE_CLASS))"
+	@printf "  $(YELLOW)%-15s$(NC) %s\n" "QEMU_RPM_DIR" "External directory containing the eight locked QEMU RPMs"
+	@printf "  $(YELLOW)%-15s$(NC) %s\n" "CNV_QEMU_IMAGE" "QEMU .3 launcher build/publish tag (default: $(CNV_QEMU_IMAGE))"
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "TARGET_OCP_VERSION" "Exact OCP target for pinned ARO flow (default: $(TARGET_OCP_VERSION))"
 
 $(TOOLS_DIR):
@@ -451,6 +457,35 @@ cnv-install: ## Install CNV nightly operator and HyperConverged CR
 
 mshv-hco-patch: ## Enable hyperv-direct through HCO annotation
 	@./scripts/07-mshv-hco-patch.sh
+
+build-qemu-3-launcher: ## Build and verify the diagnostic QEMU .3 virt-launcher image locally
+	@./scripts/09a-build-cnv-qemu-launcher.sh
+	@./scripts/09b-verify-cnv-qemu-launcher.sh
+
+check-qemu-3-publish-image:
+	@set -euo pipefail; \
+	image="$${CNV_QEMU_IMAGE}"; \
+	registry="$${image%%/*}"; \
+	if [[ "$$image" == *@* || ! "$$image" =~ ^[^/]+/.+:[^/:]+$$ \
+		|| ( "$$registry" != "localhost" && "$$registry" != *.* && "$$registry" != *:* ) ]]; then \
+		echo "$(RED)Error: CNV_QEMU_IMAGE must include a registry, repository, and tag, got '$$image'.$(NC)"; \
+		exit 1; \
+	fi
+
+publish-qemu-3-launcher: check-qemu-3-publish-image ## Build, verify, push, and print the digest-pinned QEMU .3 image
+	@$(MAKE) --no-print-directory build-qemu-3-launcher
+	@set -euo pipefail; \
+	image="$${CNV_QEMU_IMAGE}"; \
+	repository="$${image%:*}"; \
+	digest_file=$$(mktemp); \
+	trap 'rm -f "$$digest_file"' EXIT; \
+	podman push --digestfile="$$digest_file" "$$image"; \
+	digest=$$(<"$$digest_file"); \
+	if [[ ! "$$digest" =~ ^sha256:[0-9a-f]{64}$$ ]]; then \
+		echo "$(RED)Error: podman returned an invalid image digest: '$$digest'.$(NC)"; \
+		exit 1; \
+	fi; \
+	printf 'QEMU_3_LAUNCHER_IMAGE=%s@%s\n' "$$repository" "$$digest"
 
 validation-checkup: ## Run ocp-virt-validation-checkup
 	@QUAY_PULLSECRET_FILE="$(QUAY_PULLSECRET)" TEST_SUITES=$(TEST_SUITES) STORAGE_CLASS=$(STORAGE_CLASS) \

@@ -96,6 +96,17 @@ if grep -q '09d-virt-launcher-image-override.sh.*restore' "${REPO_ROOT}/scripts/
 fi
 
 grep -q '^restore-qemu-3-launcher:' "${REPO_ROOT}/Makefile"
+grep -q '^build-qemu-3-launcher:' "${REPO_ROOT}/Makefile"
+grep -q '^check-qemu-3-publish-image:' "${REPO_ROOT}/Makefile"
+grep -q '^publish-qemu-3-launcher: check-qemu-3-publish-image' "${REPO_ROOT}/Makefile"
+grep -q '09a-build-cnv-qemu-launcher.sh' "${REPO_ROOT}/Makefile"
+grep -q '09b-verify-cnv-qemu-launcher.sh' "${REPO_ROOT}/Makefile"
+grep -q 'podman push --digestfile=' "${REPO_ROOT}/Makefile"
+grep -q "QEMU_3_LAUNCHER_IMAGE=%s@%s" "${REPO_ROOT}/Makefile"
+grep -q 'make build-qemu-3-launcher' "${REPO_ROOT}/README.md"
+grep -q 'make publish-qemu-3-launcher' "${REPO_ROOT}/README.md"
+grep -q 'make build-qemu-3-launcher' "${IMAGE_DIR}/README.md"
+grep -q 'make publish-qemu-3-launcher' "${IMAGE_DIR}/README.md"
 grep -q 'USE_QEMU_3_LAUNCHER=true' "${REPO_ROOT}/README.md"
 grep -q 'remains active' "${REPO_ROOT}/README.md"
 
