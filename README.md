@@ -155,6 +155,30 @@ DRY_RUN=true make validation-checkup
 
 Diagnostic QEMU `10.1.0-17.el9_8.3` validation:
 
+Download the eight signed x86_64 RPMs listed in
+`images/cnv-qemu-launcher/qemu-rpms.lock.tsv` from Red Hat advisory
+`RHBA-2026:28656` into a directory outside this repository. Build and verify a
+local image with:
+
+```sh
+QEMU_RPM_DIR=/absolute/path/to/qemu-rpms make build-qemu-3-launcher
+```
+
+To publish the image, provide a registry tag. The target repeats the build and
+verification, pushes the image, and prints the digest-pinned value to use as
+`QEMU_3_LAUNCHER_IMAGE`:
+
+```sh
+QEMU_RPM_DIR=/absolute/path/to/qemu-rpms \
+CNV_QEMU_IMAGE=arol1vh.azurecr.io/aro-virt-validation/cnv-qemu-launcher:10.1.0-17.el9_8.3 \
+  make publish-qemu-3-launcher
+```
+
+Registry authentication must already be configured. For the default Azure
+Container Registry, run `make docker-login-arol1vh` first.
+
+Run validation with the published digest:
+
 ```sh
 USE_QEMU_3_LAUNCHER=true \
 QEMU_3_LAUNCHER_IMAGE=arol1vh.azurecr.io/aro-virt-validation/cnv-qemu-launcher@sha256:7c49c99f1506dce2ed93f7018dc69ed118183a116e4f93011f87dbfcb4b1d1c4 \
