@@ -54,7 +54,7 @@ NC     := $(shell printf '\033[0m')
 	ocp-up ocp-down \
 	upload-quay-pullsecret refresh-quay-pullsecret upload-pull-secret upload-local-secrets download-local-secrets \
 	prereqs check-upgrade-target aro-up aro-login aro-disable-machineset-reconcile aro-down upgrade-4.21 upgrade-4.22 upgrade-to-4.22 upgrade-to-4.22.4 techpreview mshv-node cnv-pull-secret \
-	cnv-install mshv-hco-patch build-qemu-3-launcher check-qemu-3-publish-image publish-qemu-3-launcher validation-checkup restore-qemu-3-launcher aro-validation-flow ocp-validation-flow
+	cnv-nightly-version cnv-install mshv-hco-patch build-qemu-3-launcher check-qemu-3-publish-image publish-qemu-3-launcher validation-checkup restore-qemu-3-launcher aro-validation-flow ocp-validation-flow
 
 .NOTPARALLEL: aro-validation-flow ocp-validation-flow
 
@@ -451,6 +451,10 @@ mshv-node: ## Create and verify the declarative MSHV node
 
 cnv-pull-secret: ## Add quay.io/openshift-cnv auth to cluster pull secret
 	@QUAY_PULLSECRET_FILE="$(QUAY_PULLSECRET)" ./scripts/05-cnv-pull-secret.sh
+
+cnv-nightly-version: export CNV_VERSION := $(CNV_VERSION)
+cnv-nightly-version: ## Print the latest CNV nightly version
+	@./scripts/06a-cnv-nightly-version.sh
 
 cnv-install: ## Install CNV nightly operator and HyperConverged CR
 	@CNV_VERSION=$(CNV_VERSION) ./scripts/06-cnv-install.sh
