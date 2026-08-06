@@ -453,7 +453,7 @@ cnv-pull-secret: ## Add quay.io/openshift-cnv auth to cluster pull secret
 	@QUAY_PULLSECRET_FILE="$(QUAY_PULLSECRET)" ./scripts/05-cnv-pull-secret.sh
 
 cnv-nightly-version: export CNV_VERSION := $(CNV_VERSION)
-cnv-nightly-version: ## Print the latest CNV nightly version
+cnv-nightly-version: ## Print the latest CNV, KubeVirt, and QEMU versions
 	@./scripts/06a-cnv-nightly-version.sh
 
 cnv-install: ## Install CNV nightly operator and HyperConverged CR
