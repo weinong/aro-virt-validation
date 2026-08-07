@@ -47,6 +47,22 @@ make upload-pull-secret
 make upload-quay-pullsecret
 ```
 
+The self-managed installer service principal is cached at
+`~/.azure/osServicePrincipal.json` from Key Vault secret
+`osServicePrincipal`. Append and publish a new credential before the current
+one expires with:
+
+```sh
+make rotate-service-principal-credential
+```
+
+The new credential is valid for 90 days by default. Override this with
+`SP_CREDENTIAL_DAYS=<days>`. The target retains prior application credentials
+so existing clusters are not immediately disrupted, updates Key Vault before
+atomically replacing the local file, and never prints the generated secret.
+It does not update credentials already embedded in an existing self-managed
+cluster; those credentials must remain valid through cluster teardown.
+
 ## Recommended Flows
 
 Self-managed OpenShift:
