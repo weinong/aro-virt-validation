@@ -26,8 +26,9 @@ USE_QEMU_3_LAUNCHER ?= false
 QEMU_3_LAUNCHER_IMAGE ?=
 QEMU_3_PULL_SECRET_FILE ?=
 TARGET_OCP_VERSION ?= 4.22.4
+SP_CREDENTIAL_DAYS ?= 90
 
-export QEMU_RPM_DIR CNV_QEMU_IMAGE
+export QEMU_RPM_DIR CNV_QEMU_IMAGE REGISTRY SP_CREDENTIAL_DAYS
 
 # Tool paths
 OC                = $(TOOLS_DIR)/oc
@@ -49,7 +50,7 @@ RED    := $(shell printf '\033[0;31m')
 NC     := $(shell printf '\033[0m')
 
 .PHONY: help setup-tools check-oc-command check-tools version clean clean-tools \
-	check-az-subscription azure-service-principal docker-login docker-login-quay docker-login-arol1vh \
+	check-az-subscription azure-service-principal rotate-service-principal-credential docker-login docker-login-quay docker-login-arol1vh \
 	upload-cluster-credential download-cluster-credential cluster-info \
 	ocp-up ocp-down \
 	upload-quay-pullsecret refresh-quay-pullsecret upload-pull-secret upload-local-secrets download-local-secrets \
@@ -86,6 +87,7 @@ help: ## Show this help message
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "QEMU_RPM_DIR" "External directory containing the eight locked QEMU RPMs"
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "CNV_QEMU_IMAGE" "QEMU .3 launcher build/publish tag (default: $(CNV_QEMU_IMAGE))"
 	@printf "  $(YELLOW)%-15s$(NC) %s\n" "TARGET_OCP_VERSION" "Exact OCP target for pinned ARO flow (default: $(TARGET_OCP_VERSION))"
+	@printf "  $(YELLOW)%-15s$(NC) %s\n" "SP_CREDENTIAL_DAYS" "Validity of newly appended service principal credentials (default: $(SP_CREDENTIAL_DAYS))"
 
 $(TOOLS_DIR):
 	@mkdir -p "$@"
@@ -167,6 +169,9 @@ azure-service-principal: check-az-subscription ## Ensure ~/.azure/osServicePrinc
 			exit 1; \
 		fi; \
 	fi
+
+rotate-service-principal-credential: check-az-subscription ## Append and publish a new self-managed installer SP credential
+	@./scripts/00a-rotate-service-principal-credential.sh
 
 .pullsecret: | check-az-subscription ## Download self-managed pull secret from Azure Key Vault
 	@echo "$(YELLOW)Pull secret file not found. Retrieving from Azure Key Vault...$(NC)"
