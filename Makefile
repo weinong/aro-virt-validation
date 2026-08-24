@@ -451,6 +451,9 @@ upgrade-to-4.22.4: ## Upgrade current cluster exactly to OCP 4.22.4
 techpreview: ## Enable and verify TechPreviewNoUpgrade
 	@./scripts/03-techpreview-setup.sh
 
+techpreview-crd-ordering-fix: ## Detect/pre-apply payload CRDs mis-ordered after their CR (OCPBUGS-99266 workaround)
+	@./scripts/03a-payload-crd-ordering-fix.sh
+
 mshv-node: ## Create and verify the declarative MSHV node
 	@./scripts/04-mshv-node-setup.sh
 

@@ -174,9 +174,9 @@ guard_known_bad_techpreview_payload() {
       return 0
     fi
     log_error "Payload ${version} is blocked for ${context}."
-    log_error "Known issue: 4.22.0-rc.3 and older 4.22 pre-release payloads can fail applying CRIOCredentialProviderConfig before its CRD is served."
-    log_error "Use a newer 4.22 payload before enabling TechPreviewNoUpgrade."
-    log_error "Set ALLOW_KNOWN_BAD_TECHPREVIEW_PAYLOAD=true only to deliberately reproduce/document this issue."
+    log_error "Known issue: 4.22.0-rc.3 and older 4.22 pre-release payloads can fail applying CRIOCredentialProviderConfig before its CRD is served (OCPBUGS-99266)."
+    log_error "Phase 3 (scripts/03a-payload-crd-ordering-fix.sh) auto-remediates this defect once the cluster exists; this pre-cluster guard stays conservative."
+    log_error "Use a newer 4.22 payload before enabling TechPreviewNoUpgrade, or set ALLOW_KNOWN_BAD_TECHPREVIEW_PAYLOAD=true to deliberately reproduce/document this issue."
     return 1
   fi
 }

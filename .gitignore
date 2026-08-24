@@ -14,3 +14,5 @@ docs/6070641.md
 .checkup-runs/
 .smoke-runs/
 /rpms/
+.azure/
+.standup-logs/

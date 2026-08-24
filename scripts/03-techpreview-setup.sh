@@ -31,7 +31,12 @@ if [[ "${CURRENT_MINOR}" -lt 22 ]]; then
   exit 1
 fi
 
-guard_known_bad_techpreview_payload "${CURRENT_VERSION}" "TechPreviewNoUpgrade validation" || exit 1
+if is_known_bad_techpreview_payload "${CURRENT_VERSION}"; then
+  log_warn "Payload ${CURRENT_VERSION} matches the known CR-before-CRD payload ordering issue."
+  log_warn "The flow no longer fails on version alone; scripts/03a-payload-crd-ordering-fix.sh"
+  log_warn "detects the defect in the payload and pre-applies the affected CRD(s) as a"
+  log_warn "documented workaround (issues/2026-08-24.md, OCPBUGS-99266). The payload bug stays open."
+fi
 
 CURRENT_FS="$(oc get featuregate/cluster -o jsonpath='{.spec.featureSet}' 2>/dev/null || echo '')"
 if [[ "${CURRENT_FS}" == "TechPreviewNoUpgrade" ]]; then
@@ -42,6 +47,15 @@ else
   oc patch featuregate/cluster --type merge -p '{"spec":{"featureSet":"TechPreviewNoUpgrade"}}'
   log_ok "TechPreviewNoUpgrade enabled."
 fi
+
+# Some payloads order a feature-gated CR before its own CRD, which wedges the
+# CVO under TechPreview (issues/2026-08-24.md). Pre-apply the affected payload
+# CRD(s) as a documented workaround so the CVO can make progress.
+log_info "Running the payload CR-before-CRD ordering workaround (03a)..."
+"${SCRIPT_DIR}/03a-payload-crd-ordering-fix.sh" || {
+  log_error "The payload CRD ordering workaround failed."
+  exit 1
+}
 
 log_info "Waiting for ClusterOperators to settle..."
 oc wait co --all --for=condition=Available --timeout=30m
@@ -55,8 +69,20 @@ ELAPSED=0
 while true; do
   PROGRESSING="$(oc get clusterversion version -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null || echo '')"
   FAILING="$(oc get clusterversion version -o jsonpath='{.status.conditions[?(@.type=="Failing")].status}' 2>/dev/null || echo '')"
+  FAILING_REASON="$(oc get clusterversion version -o jsonpath='{.status.conditions[?(@.type=="Failing")].reason}' 2>/dev/null || echo '')"
   MESSAGE="$(oc get clusterversion version -o jsonpath='{.status.conditions[?(@.type=="Progressing")].message}' 2>/dev/null || echo '')"
   if [[ "${FAILING}" == "True" ]]; then
+    if [[ "${FAILING_REASON}" == "UpdatePayloadResourceTypeMissing" ]]; then
+      log_warn "CVO is failing with UpdatePayloadResourceTypeMissing; re-running the payload CRD ordering workaround (03a)."
+      oc get clusterversion version -o jsonpath='{.status.conditions[?(@.type=="Failing")].message}{"\n"}' || true
+      "${SCRIPT_DIR}/03a-payload-crd-ordering-fix.sh" || {
+        log_error "The payload CRD ordering workaround failed."
+        exit 1
+      }
+      sleep 30
+      ELAPSED=$((ELAPSED + 30))
+      continue
+    fi
     log_error "ClusterVersion is failing after TechPreviewNoUpgrade."
     oc get clusterversion version -o yaml
     exit 1
@@ -90,11 +116,19 @@ REQUIRED_CRDS=(
   dnsnameresolvers.network.openshift.io
   osimagestreams.machineconfiguration.openshift.io
 )
+REMEDIATION_ATTEMPTED=false
 for crd in "${REQUIRED_CRDS[@]}"; do
   if ! oc get crd "${crd}" &>/dev/null; then
-    log_error "Required TechPreview CRD is missing: ${crd}"
-    log_error "Stop and document the missing extension instead of applying payload CRDs manually."
-    exit 1
+    if [[ "${REMEDIATION_ATTEMPTED}" == "false" ]]; then
+      log_warn "Required TechPreview CRD ${crd} missing; re-running the payload CRD ordering workaround (03a)."
+      "${SCRIPT_DIR}/03a-payload-crd-ordering-fix.sh" || true
+      REMEDIATION_ATTEMPTED=true
+    fi
+    if ! oc get crd "${crd}" &>/dev/null; then
+      log_error "Required TechPreview CRD is still missing after the payload workaround: ${crd}"
+      log_error "This is outside the known CR-before-CRD ordering defect. Stop and document it under issues/."
+      exit 1
+    fi
   fi
 done
 log_ok "Required TechPreview CRDs are present."
