@@ -40,6 +40,30 @@ The COPR/URL alternative (`KERNEL_RPM_SOURCE=copr`, URLs preset in `l1vh.env`)
 needs in-cluster build-pod egress to the download host; the local carrier path
 avoids that and is preferred for this unsigned kernel.
 
+## ARO: on-cluster build is blocked; use the out-of-cluster path
+
+On ARO 4.22 the **on-cluster** `MachineOSConfig` build (`scripts/12`) fails: the
+MCO build pod cannot verify the signed RHCOS release base image required by the
+`openshift` `ClusterImagePolicy` (sigstore attachment lookup is disabled in the
+build). See `issues/2026-08-24b-oncluster-layering-signature.md`.
+
+Use the **out-of-cluster** path instead, which builds the image locally and
+rolls it out via `osImageURL`:
+
+```sh
+ALLOW_UNSIGNED_KERNEL_RPMS=true \
+KERNEL_RPM_DIR=/absolute/path/to/kernel-l1vh \
+  make rhcos-kernel-layer-ooc
+EXPECTED_KERNEL=6.12.0-211.49.1.1794_2777371478.el10_2 make verify-kernel-layer
+make revert-kernel-layer-ooc   # removes the layer and restores the rhel-10 OS stream
+```
+
+This resolves the mshv pool's rhel-10 base, builds `FROM` it with
+`rpm-ostree override replace`, pushes to the internal registry, and sets
+`osImageURL` on the `mshv` role. Because `osImageURL` and a pool `osImageStream`
+are mutually exclusive, the script removes the pool's `osImageStream` (stored on
+the MachineConfig and restored on revert).
+
 ## Two kernel RPM sources
 
 `KERNEL_RPM_SOURCE=copr` (default): the in-cluster build fetches the kernel RPMs

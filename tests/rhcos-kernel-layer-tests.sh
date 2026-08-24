@@ -13,6 +13,7 @@ required=(
   "${REPO_ROOT}/scripts/12-rhcos-kernel-layer.sh"
   "${REPO_ROOT}/scripts/12a-build-kernel-rpm-carrier.sh"
   "${REPO_ROOT}/scripts/12b-verify-kernel-layer.sh"
+  "${REPO_ROOT}/scripts/12c-rhcos-kernel-layer-out-of-cluster.sh"
 )
 for file in "${required[@]}"; do
   [[ -f "${file}" ]] || { printf 'missing required file: %s\n' "${file}" >&2; exit 1; }
@@ -71,6 +72,20 @@ grep -q '/dev/mshv' "${verify}"
 grep -q 'mshv_root' "${verify}"
 grep -q 'running as L1VH partition' "${verify}"
 grep -q 'rpm-ostree status' "${verify}"
+# Verify script handles both the on-cluster and out-of-cluster (osImageURL) paths.
+grep -q 'machineosconfig' "${verify}"
+grep -q 'osImageURL' "${verify}"
+
+# Out-of-cluster script builds FROM the resolved base and applies osImageURL.
+ooc="${REPO_ROOT}/scripts/12c-rhcos-kernel-layer-out-of-cluster.sh"
+grep -q 'rpm-ostree override replace' "${ooc}"
+grep -q 'bootc container lint' "${ooc}"
+grep -q 'osImageURL' "${ooc}"
+grep -q 'sha256sum --check' "${ooc}"
+grep -q 'imagedigestmirrorset' "${ooc}"
+# Must handle the osImageStream/osImageURL mutual exclusion and restore on revert.
+grep -q 'osImageStream' "${ooc}"
+grep -q 'original-os-image-stream' "${ooc}"
 
 # The lock file template must parse (comments only is fine as a template).
 awk -F '\t' 'NF && $1 !~ /^#/ {

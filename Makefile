@@ -518,6 +518,12 @@ render-kernel-layer: ## Print the mshv MachineOSConfig for the custom kernel lay
 rhcos-kernel-layer: ## Apply the day-2 custom kernel RHCOS layer to the mshv pool (KERNEL_RPM_SOURCE=copr|local)
 	@./scripts/12-rhcos-kernel-layer.sh apply
 
+rhcos-kernel-layer-ooc: ## Apply the kernel layer out-of-cluster via osImageURL (ARO on-cluster-build signature workaround)
+	@./scripts/12c-rhcos-kernel-layer-out-of-cluster.sh apply
+
+revert-kernel-layer-ooc: ## Remove the out-of-cluster kernel layer and restore the mshv OS stream
+	@./scripts/12c-rhcos-kernel-layer-out-of-cluster.sh revert
+
 verify-kernel-layer: ## Verify the custom kernel layer and MSHV/L1VH host state on the mshv node
 	@./scripts/12b-verify-kernel-layer.sh
 

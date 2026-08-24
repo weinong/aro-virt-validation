@@ -24,10 +24,23 @@ check_command jq || exit 1
 
 oc whoami >/dev/null 2>&1 || { log_error "Not logged in."; exit 1; }
 
-log_info "Confirming the MachineOSConfig ${MOC_NAME} is applied..."
-CURRENT_IMAGE="$(oc get machineosconfig "${MOC_NAME}" -o jsonpath='{.status.currentImagePullSpec}' 2>/dev/null || echo '')"
+log_info "Confirming a custom kernel layer is applied to the ${MSHV_MCP_NAME:-mshv} pool..."
+MSHV_MCP_NAME="${MSHV_MCP_NAME:-mshv}"
+CURRENT_IMAGE=""
+# On-cluster path: MachineOSConfig exposes the built image pull spec.
+if oc get machineosconfig "${MOC_NAME}" &>/dev/null; then
+  CURRENT_IMAGE="$(oc get machineosconfig "${MOC_NAME}" -o jsonpath='{.status.currentImagePullSpec}' 2>/dev/null || echo '')"
+fi
+# Out-of-cluster path: the mshv rendered MachineConfig carries the osImageURL.
 if [[ -z "${CURRENT_IMAGE}" ]]; then
-  log_error "MachineOSConfig ${MOC_NAME} has no currentImagePullSpec. Run scripts/12-rhcos-kernel-layer.sh apply first."
+  RENDERED_MC="$(oc get mcp "${MSHV_MCP_NAME}" -o jsonpath='{.spec.configuration.name}' 2>/dev/null || echo '')"
+  if [[ -n "${RENDERED_MC}" ]]; then
+    CURRENT_IMAGE="$(oc get mc "${RENDERED_MC}" -o jsonpath='{.spec.osImageURL}' 2>/dev/null || echo '')"
+  fi
+fi
+if [[ -z "${CURRENT_IMAGE}" ]]; then
+  log_error "No custom layered image found (neither MachineOSConfig ${MOC_NAME} nor an mshv osImageURL)."
+  log_error "Run scripts/12-rhcos-kernel-layer.sh apply (on-cluster) or scripts/12c-rhcos-kernel-layer-out-of-cluster.sh apply first."
   exit 1
 fi
 log_ok "Layered image: ${CURRENT_IMAGE}"
