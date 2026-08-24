@@ -1,0 +1,15 @@
+# package	evr	arch	sha256
+#
+# Locally-provided kernel RPMs for the KERNEL_RPM_SOURCE=local path. Fill in one
+# row per RPM with the exact NAME, EPOCH:VERSION-RELEASE, ARCH, and sha256 of the
+# signed RPM. scripts/12a-build-kernel-rpm-carrier.sh verifies every staged RPM
+# against these rows (sha256 + Red Hat signature) before it enters the carrier
+# image. RPM binaries are never committed; stage them in KERNEL_RPM_DIR outside
+# this repository.
+#
+# Example (RHCOS 10 uses el10 kernels; replace with your locked build):
+# kernel	0:6.12.0-55.el10	x86_64	<sha256>
+# kernel-core	0:6.12.0-55.el10	x86_64	<sha256>
+# kernel-modules	0:6.12.0-55.el10	x86_64	<sha256>
+# kernel-modules-core	0:6.12.0-55.el10	x86_64	<sha256>
+# kernel-modules-extra	0:6.12.0-55.el10	x86_64	<sha256>

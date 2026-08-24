@@ -506,6 +506,21 @@ validation-checkup: ## Run ocp-virt-validation-checkup
 restore-qemu-3-launcher: ## Explicitly restore the shipped CNV virt-launcher after a QEMU .3 validation run
 	@./scripts/09d-virt-launcher-image-override.sh restore
 
+build-kernel-rpm-carrier: ## Build and push the local kernel RPM carrier image (KERNEL_RPM_DIR required)
+	@./scripts/12a-build-kernel-rpm-carrier.sh
+
+render-kernel-layer: ## Print the mshv MachineOSConfig for the custom kernel layer without applying it
+	@./scripts/12-rhcos-kernel-layer.sh render
+
+rhcos-kernel-layer: ## Apply the day-2 custom kernel RHCOS layer to the mshv pool (KERNEL_RPM_SOURCE=copr|local)
+	@./scripts/12-rhcos-kernel-layer.sh apply
+
+verify-kernel-layer: ## Verify the custom kernel layer and MSHV/L1VH host state on the mshv node
+	@./scripts/12b-verify-kernel-layer.sh
+
+revert-kernel-layer: ## Remove the custom kernel layer and roll the mshv pool back to its base image
+	@./scripts/12-rhcos-kernel-layer.sh revert
+
 aro-validation-flow: ## Run the full ARO validation flow sequentially
 	@TARGET_OCP_VERSION=4.22.4 $(MAKE) check-upgrade-target
 	@$(MAKE) aro-up

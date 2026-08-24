@@ -1,0 +1,17 @@
+# Rendered into the mshv MachineOSConfig containerFile by
+# scripts/12-rhcos-kernel-layer.sh. This is NOT built with podman; the Machine
+# Config Operator builds it on-cluster.
+#
+# "configs" is the on-cluster build stage that resolves to the mshv pool's
+# current base image. Because the mshv MachineConfigPool is pinned to the
+# rhel-10 OS stream, this FROM inherits the correct RHCOS 10 base automatically,
+# so we never pin osImageURL by hand.
+FROM configs AS final
+
+# Replace the stock RHCOS kernel with the custom kernel packages published at the
+# URLs injected by the script (COPR or any HTTPS mirror). rpm-ostree override
+# replace is the documented mechanism for swapping an already-installed package
+# such as the kernel. bootc container lint fails the build on a malformed image.
+RUN rpm-ostree override replace @@KERNEL_RPM_URLS@@ && \
+    rpm-ostree cleanup -m && \
+    bootc container lint

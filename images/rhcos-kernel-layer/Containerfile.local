@@ -1,0 +1,21 @@
+# Rendered into the mshv MachineOSConfig containerFile by
+# scripts/12-rhcos-kernel-layer.sh. This is NOT built with podman; the Machine
+# Config Operator builds it on-cluster.
+#
+# On-cluster builds cannot upload a local build context, so locally-provided
+# kernel RPMs are delivered through a "carrier" image built and pushed by
+# scripts/12a-build-kernel-rpm-carrier.sh. The build pulls that carrier as an
+# extra stage and copies the verified RPMs out of it.
+FROM @@CARRIER_IMAGE@@ AS rpms
+
+# "configs" resolves to the mshv pool's current rhel-10 base image.
+FROM configs AS final
+COPY --from=rpms /rpms /tmp/kernel-rpms
+
+# rpm-ostree override replace swaps the already-installed kernel packages for the
+# locally-provided RPMs. bootc container lint fails the build on a malformed
+# image.
+RUN rpm-ostree override replace /tmp/kernel-rpms/*.rpm && \
+    rm -rf /tmp/kernel-rpms && \
+    rpm-ostree cleanup -m && \
+    bootc container lint

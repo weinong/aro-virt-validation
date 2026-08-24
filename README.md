@@ -218,6 +218,41 @@ file and run the explicit restore after resolving any reported drift.
 
 Artifacts are saved under `.checkup-runs/<timestamp>/`.
 
+## Day-2 RHCOS Custom Kernel Layering (mshv pool)
+
+Apply a custom kernel to the RHCOS 10 MSHV/CNV nodes as a day-2
+[image mode / RHCOS layer](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/machine_configuration/mco-coreos-layering)
+using the **on-cluster** build path (a `MachineOSConfig` targeting the `mshv`
+MachineConfigPool). `FROM configs AS final` inherits the pool's rhel-10 base, so
+`osImageURL` is never hand-pinned. See `images/rhcos-kernel-layer/README.md` for
+details and caveats (notably the `mshv_root`/L1VH risk of swapping the kernel).
+
+COPR / URL kernel RPMs (build pod fetches them directly):
+
+```sh
+KERNEL_RPM_SOURCE=copr \
+KERNEL_RPM_URLS="https://.../kernel-6.12.0-55.el10.x86_64.rpm https://.../kernel-core-...rpm https://.../kernel-modules-...rpm" \
+  make rhcos-kernel-layer
+```
+
+Locally-provided signed RPMs (verified, packed into a carrier image, pushed to
+the internal registry, then referenced by the on-cluster build). Fill in
+`images/rhcos-kernel-layer/kernel-rpms.lock.tsv` and stage the RPMs outside the
+repo:
+
+```sh
+KERNEL_RPM_DIR=/absolute/path/to/kernel-rpms make build-kernel-rpm-carrier
+KERNEL_RPM_SOURCE=local make rhcos-kernel-layer
+```
+
+Preview, verify on the node, and revert:
+
+```sh
+make render-kernel-layer                       # print the MachineOSConfig only
+EXPECTED_KERNEL=6.12.0-55.el10 make verify-kernel-layer
+make revert-kernel-layer                       # roll back to the base image
+```
+
 ## Cleanup
 
 ```sh
