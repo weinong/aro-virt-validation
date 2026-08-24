@@ -16,6 +16,30 @@ Apply and revert with `scripts/12-rhcos-kernel-layer.sh` (or the
 `rhcos-kernel-layer` / `revert-kernel-layer` make targets). Verify on the node
 with `scripts/12b-verify-kernel-layer.sh`.
 
+## Current pin: L1VH test kernel (RHCOS 10)
+
+`kernel-rpms.lock.tsv` and `l1vh.env` are pinned to Paolo Bonzini's L1VH test
+kernel **`6.12.0-211.49.1.1794_2777371478.el10_2`** (x86_64) from
+<https://bonzini.fedorapeople.org/kernel-l1vh/>. These are **unsigned developer
+RPMs**, so the carrier build must be run with `ALLOW_UNSIGNED_KERNEL_RPMS=true`
+(the sha256 lock is still enforced). RHCOS 10 installs all five kernel
+subpackages (`kernel`, `kernel-core`, `kernel-modules`, `kernel-modules-core`,
+`kernel-modules-extra`), so all five are replaced together.
+
+Recommended (local carrier) flow:
+
+```sh
+source images/rhcos-kernel-layer/l1vh.env
+# stage the five RPMs outside the repo (see l1vh.env for the exact curl loop)
+KERNEL_RPM_DIR=/tmp/kernel-l1vh make build-kernel-rpm-carrier
+KERNEL_RPM_SOURCE=local make rhcos-kernel-layer
+EXPECTED_KERNEL=6.12.0-211.49.1.1794_2777371478.el10_2 make verify-kernel-layer
+```
+
+The COPR/URL alternative (`KERNEL_RPM_SOURCE=copr`, URLs preset in `l1vh.env`)
+needs in-cluster build-pod egress to the download host; the local carrier path
+avoids that and is preferred for this unsigned kernel.
+
 ## Two kernel RPM sources
 
 `KERNEL_RPM_SOURCE=copr` (default): the in-cluster build fetches the kernel RPMs

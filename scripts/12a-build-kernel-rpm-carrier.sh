@@ -33,6 +33,9 @@ PUSH_CARRIER="${PUSH_CARRIER:-true}"
 RPM_VERIFY_IMAGE="${RPM_VERIFY_IMAGE:-registry.access.redhat.com/ubi9/ubi:latest}"
 # Optional directory of extra RPM-GPG public keys to import (e.g. RHEL 10 keys).
 RPM_GPG_KEY_DIR="${RPM_GPG_KEY_DIR:-}"
+# Explicit opt-in for unsigned developer kernels (e.g. the L1VH test kernel).
+# The sha256 lock is ALWAYS enforced; this only relaxes the GPG signature check.
+ALLOW_UNSIGNED_KERNEL_RPMS="${ALLOW_UNSIGNED_KERNEL_RPMS:-false}"
 
 check_command podman || exit 1
 check_command sha256sum || exit 1
@@ -78,32 +81,38 @@ done
 log_ok "All staged kernel RPMs match the locked sha256 digests."
 
 # --- Signature verification in a container that has the Red Hat GPG keys ------
-key_mount=()
-if [[ -n "${RPM_GPG_KEY_DIR}" ]]; then
-  [[ -d "${RPM_GPG_KEY_DIR}" ]] || { log_error "RPM_GPG_KEY_DIR not found: ${RPM_GPG_KEY_DIR}"; exit 1; }
-  key_mount=(-v "$(realpath "${RPM_GPG_KEY_DIR}"):/extra-keys:ro,Z")
-fi
+if [[ "${ALLOW_UNSIGNED_KERNEL_RPMS}" == "true" ]]; then
+  log_warn "ALLOW_UNSIGNED_KERNEL_RPMS=true: skipping GPG signature verification."
+  log_warn "This is an explicit opt-in for unsigned developer kernels (e.g. the L1VH"
+  log_warn "test kernel). The sha256 lock was still enforced. Do not use for production."
+else
+  key_mount=()
+  if [[ -n "${RPM_GPG_KEY_DIR}" ]]; then
+    [[ -d "${RPM_GPG_KEY_DIR}" ]] || { log_error "RPM_GPG_KEY_DIR not found: ${RPM_GPG_KEY_DIR}"; exit 1; }
+    key_mount=(-v "$(realpath "${RPM_GPG_KEY_DIR}"):/extra-keys:ro,Z")
+  fi
 
-podman run --rm \
-  -v "${verify_dir}/rpms:/rpms:ro,Z" \
-  "${key_mount[@]}" \
-  --entrypoint /bin/sh \
-  "${RPM_VERIFY_IMAGE}" \
-  -c '
-    set -e
-    for k in /etc/pki/rpm-gpg/RPM-GPG-KEY-* /extra-keys/*; do
-      [ -f "$k" ] && rpm --import "$k" 2>/dev/null || true
-    done
-    fail=0
-    for f in /rpms/*.rpm; do
-      out="$(rpm -Kv "$f")"
-      printf "%s\n%s\n" "$f" "$out"
-      echo "$out" | grep -qiE "Header V[0-9]+ .* Signature.*: OK" || { echo "UNSIGNED_OR_UNTRUSTED: $f" >&2; fail=1; }
-      echo "$out" | grep -qi "digests signatures OK" || { echo "NO_SIGNATURE_OK: $f" >&2; fail=1; }
-    done
-    exit $fail
-  ' | tee "${verify_dir}/rpm-verification.txt"
-log_ok "All staged kernel RPMs carry a trusted signature."
+  podman run --rm \
+    -v "${verify_dir}/rpms:/rpms:ro,Z" \
+    "${key_mount[@]}" \
+    --entrypoint /bin/sh \
+    "${RPM_VERIFY_IMAGE}" \
+    -c '
+      set -e
+      for k in /etc/pki/rpm-gpg/RPM-GPG-KEY-* /extra-keys/*; do
+        [ -f "$k" ] && rpm --import "$k" 2>/dev/null || true
+      done
+      fail=0
+      for f in /rpms/*.rpm; do
+        out="$(rpm -Kv "$f")"
+        printf "%s\n%s\n" "$f" "$out"
+        echo "$out" | grep -qiE "Header V[0-9]+ .* Signature.*: OK" || { echo "UNSIGNED_OR_UNTRUSTED: $f" >&2; fail=1; }
+        echo "$out" | grep -qi "digests signatures OK" || { echo "NO_SIGNATURE_OK: $f" >&2; fail=1; }
+      done
+      exit $fail
+    ' | tee "${verify_dir}/rpm-verification.txt"
+  log_ok "All staged kernel RPMs carry a trusted signature."
+fi
 
 # Build from the exact files that passed checksum and signature checks.
 cp "${verify_dir}"/rpms/*.rpm "${context_dir}/rpms/"

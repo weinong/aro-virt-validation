@@ -2,14 +2,17 @@
 #
 # Locally-provided kernel RPMs for the KERNEL_RPM_SOURCE=local path. Fill in one
 # row per RPM with the exact NAME, EPOCH:VERSION-RELEASE, ARCH, and sha256 of the
-# signed RPM. scripts/12a-build-kernel-rpm-carrier.sh verifies every staged RPM
-# against these rows (sha256 + Red Hat signature) before it enters the carrier
-# image. RPM binaries are never committed; stage them in KERNEL_RPM_DIR outside
-# this repository.
+# RPM. scripts/12a-build-kernel-rpm-carrier.sh verifies every staged RPM against
+# these rows (sha256 always; Red Hat signature unless ALLOW_UNSIGNED_KERNEL_RPMS=true)
+# before it enters the carrier image. RPM binaries are never committed; stage them
+# in KERNEL_RPM_DIR outside this repository.
 #
-# Example (RHCOS 10 uses el10 kernels; replace with your locked build):
-# kernel	0:6.12.0-55.el10	x86_64	<sha256>
-# kernel-core	0:6.12.0-55.el10	x86_64	<sha256>
-# kernel-modules	0:6.12.0-55.el10	x86_64	<sha256>
-# kernel-modules-core	0:6.12.0-55.el10	x86_64	<sha256>
-# kernel-modules-extra	0:6.12.0-55.el10	x86_64	<sha256>
+# Current pin: Paolo Bonzini's L1VH test kernel for RHCOS 10 (el10_2), an UNSIGNED
+# developer build from https://bonzini.fedorapeople.org/kernel-l1vh/ . Because it
+# is unsigned, build the carrier with ALLOW_UNSIGNED_KERNEL_RPMS=true. RHCOS 10
+# installs all five of these subpackages, so all five are replaced together.
+kernel	0:6.12.0-211.49.1.1794_2777371478.el10_2	x86_64	f5d85a9637a9b727d7f3c1f804878c5a0920a81fdc4b20d00dcd17868f0f90e7
+kernel-core	0:6.12.0-211.49.1.1794_2777371478.el10_2	x86_64	c6011a81a6b948328325064d9680a289e20037eb966264e20acdeb426a7e0bd3
+kernel-modules	0:6.12.0-211.49.1.1794_2777371478.el10_2	x86_64	b608c2bfd71e2a6fc28ccd4b23593948fbb775962e76d9e274327d90714cd9a7
+kernel-modules-core	0:6.12.0-211.49.1.1794_2777371478.el10_2	x86_64	3e090c5fce39f15aae09daa77dba1b6aaae32b7c153de08f59c537113ee68ebd
+kernel-modules-extra	0:6.12.0-211.49.1.1794_2777371478.el10_2	x86_64	f2465bec18f4064001cfc6e8802e3a21f728b420ee2b892ae10792e332a25791
