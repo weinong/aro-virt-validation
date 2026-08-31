@@ -470,6 +470,9 @@ cnv-install: ## Install CNV nightly operator and HyperConverged CR
 mshv-hco-patch: ## Enable hyperv-direct through HCO annotation
 	@./scripts/07-mshv-hco-patch.sh
 
+hco-default-cpu-model: ## Set HCO defaultCPUModel (default Nehalem) to a node-advertised CPU model
+	@./scripts/07a-hco-default-cpu-model.sh
+
 build-qemu-3-launcher: ## Build and verify the diagnostic QEMU .3 virt-launcher image locally
 	@./scripts/09a-build-cnv-qemu-launcher.sh
 	@./scripts/09b-verify-cnv-qemu-launcher.sh
