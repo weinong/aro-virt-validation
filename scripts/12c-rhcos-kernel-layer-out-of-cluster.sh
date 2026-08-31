@@ -164,10 +164,27 @@ else
 fi
 
 # --- Resolve the mshv pool base image and its ImageDigestMirrorSet mirror ------
-rendered_mc="$(oc get mcp "${MSHV_MCP_NAME}" -o jsonpath='{.spec.configuration.name}')"
-BASE_IMAGE="${BASE_IMAGE:-$(oc get mc "${rendered_mc}" -o jsonpath='{.spec.osImageURL}')}"
-[[ -n "${BASE_IMAGE}" ]] || { log_error "Could not resolve the ${MSHV_MCP_NAME} base osImageURL."; exit 1; }
-log_info "mshv base image: ${BASE_IMAGE}"
+# Resolve from the OSImageStream (stable rhel-10 base), not the rendered MC
+# osImageURL, because once a layer is applied that osImageURL points at our own
+# custom image -- resolving from it would double-layer on top of the last build.
+MSHV_OS_STREAM="${MSHV_OS_STREAM:-rhel-10}"
+if [[ -z "${BASE_IMAGE:-}" ]]; then
+  BASE_IMAGE="$(oc get osimagestreams cluster -o json 2>/dev/null \
+    | jq -r --arg s "${MSHV_OS_STREAM}" '.status.availableStreams[]? | select(.name==$s) | .osImage' 2>/dev/null || echo '')"
+fi
+# Fall back to the rendered MC only if the OSImageStream is unavailable and the
+# pool is not yet layered (osImageURL still points at a release image).
+if [[ -z "${BASE_IMAGE}" ]]; then
+  rendered_mc="$(oc get mcp "${MSHV_MCP_NAME}" -o jsonpath='{.spec.configuration.name}' 2>/dev/null || echo '')"
+  BASE_IMAGE="$(oc get mc "${rendered_mc}" -o jsonpath='{.spec.osImageURL}' 2>/dev/null || echo '')"
+fi
+[[ -n "${BASE_IMAGE}" ]] || { log_error "Could not resolve the ${MSHV_MCP_NAME} rhel-10 base image (OSImageStream '${MSHV_OS_STREAM}')."; exit 1; }
+if [[ "${BASE_IMAGE}" == *"/${OSIMAGE_REPO%%/*}/"* || "${BASE_IMAGE}" == *"mshv-kernel-osimage"* ]]; then
+  log_error "Resolved base image looks like an already-layered image: ${BASE_IMAGE}"
+  log_error "Set BASE_IMAGE to the rhel-10 release base explicitly."
+  exit 1
+fi
+log_info "mshv rhel-10 base image: ${BASE_IMAGE}"
 
 base_repo="${BASE_IMAGE%@*}"
 base_digest="${BASE_IMAGE#*@}"
@@ -211,9 +228,17 @@ for _ in $(seq 1 30); do
 done
 [[ -n "${route_host}" ]] || { log_error "Internal registry default route did not appear."; exit 1; }
 
-oc registry login --registry="${route_host}" --insecure=true --to="${work_dir}/reg-auth.json" >/dev/null 2>&1 || true
+mint_registry_token() {
+  # Works with both token- and client-cert-based kubeconfigs. The builder SA in
+  # the target namespace has push access to that namespace's registry repos.
+  oc create token builder -n "${MOC_NAMESPACE}" --duration=60m 2>/dev/null \
+    || oc whoami -t 2>/dev/null || echo ''
+}
+
+reg_token="$(mint_registry_token)"
+[[ -n "${reg_token}" ]] || { log_error "Could not obtain an internal-registry token (need a token session or 'oc create token' permission)."; exit 1; }
 podman login --tls-verify=false --authfile "${work_dir}/reg-auth.json" \
-  -u kubeadmin -p "$(oc whoami -t)" "${route_host}" >/dev/null
+  -u builder -p "${reg_token}" "${route_host}" >/dev/null
 
 remote="${route_host}/${OSIMAGE_REPO}:l1vh"
 digest_file="${work_dir}/digest"
@@ -225,8 +250,9 @@ for attempt in 1 2 3; do
     break
   fi
   log_warn "Push attempt ${attempt} failed; refreshing registry login and retrying..."
+  reg_token="$(mint_registry_token)"
   podman login --tls-verify=false --authfile "${work_dir}/reg-auth.json" \
-    -u kubeadmin -p "$(oc whoami -t)" "${route_host}" >/dev/null 2>&1 || true
+    -u builder -p "${reg_token}" "${route_host}" >/dev/null 2>&1 || true
   sleep 10
 done
 [[ "${push_ok}" == "true" ]] || { log_error "Failed to push the OS image to the internal registry."; exit 1; }
@@ -244,6 +270,12 @@ if [[ -n "${ORIG_STREAM}" ]]; then
   log_warn "mshv MCP uses osImageStream=${ORIG_STREAM}, which cannot coexist with an osImageURL MachineConfig."
   log_warn "Removing spec.osImageStream so the custom osImageURL takes effect (stored on ${MC_NAME} for revert)."
   oc patch mcp "${MSHV_MCP_NAME}" --type=json -p '[{"op":"remove","path":"/spec/osImageStream"}]'
+  STREAM_ANNOTATION="${ORIG_STREAM}"
+else
+  # Stream already removed (e.g. re-layering). Preserve any previously stored
+  # value so revert can still restore the original OS stream.
+  STREAM_ANNOTATION="$(oc get mc "${MC_NAME}" -o jsonpath='{.metadata.annotations.aro-virt-validation/original-os-image-stream}' 2>/dev/null || echo '')"
+  log_info "mshv MCP already uses osImageURL; preserving original-os-image-stream='${STREAM_ANNOTATION}'."
 fi
 
 log_info "Applying MachineConfig ${MC_NAME} (osImageURL) for role ${MSHV_MCP_NAME}..."
@@ -255,7 +287,7 @@ metadata:
   labels:
     machineconfiguration.openshift.io/role: ${MSHV_MCP_NAME}
   annotations:
-    aro-virt-validation/original-os-image-stream: "${ORIG_STREAM}"
+    aro-virt-validation/original-os-image-stream: "${STREAM_ANNOTATION}"
 spec:
   osImageURL: ${OSIMAGE_INCLUSTER}
 EOF
