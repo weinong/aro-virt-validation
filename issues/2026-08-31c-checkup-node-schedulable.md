@@ -55,26 +55,68 @@ requested `devices.kubevirt.io/mshv: 1` (plus the `cpu-model.node.kubevirt.io/Ne
 selector from the default CPU model).
 
 `scripts/07-mshv-hco-patch.sh` no longer sets the workload nodePlacement (and
-clears it if a previous run set it). virt-handler then runs on all workers, so
-all non-control-plane nodes report `kubevirt.io/schedulable=true` and the
-BeforeSuite passes, while VMs remain constrained to mshv nodes by the mshv device
-requirement.
+clears it if a previous run set it). This makes **gate 1** pass — virt-handler
+runs on all workers, so all non-control-plane nodes report
+`kubevirt.io/schedulable=true`.
+
+## The BeforeSuite has a SECOND, contradictory gate
+
+After gate 1 passes, `EnsureHypervisorPresent()` (`fixture.go`) fails within 120s:
 
 ```
-# before: only the mshv node schedulable -> BeforeSuite times out
-# after:  all four workers schedulable, VMs still land on the mshv node
-oc get nodes -l '!node-role.kubernetes.io/control-plane' \
-  -o custom-columns=NAME:.metadata.name,SCHED:.metadata.labels.kubevirt\.io/schedulable
+Both mshv and vhost-net devices are required for testing, but are not present on cluster nodes
 ```
 
-## Remaining limitation (topology)
+```go
+for _, pod := range virtHandlerPods {          // every node running virt-handler
+    node := Nodes().Get(pod.Spec.NodeName)
+    ready = ready && node.Allocatable["devices.kubevirt.io/mshv"]     > 0
+                  && node.Allocatable["devices.kubevirt.io/vhost-net"] > 0
+}
+```
 
-This cluster has a single mshv node plus three plain workers. Even with the
-BeforeSuite passing, the checkup is the upstream KubeVirt conformance suite and
-assumes a homogeneous, multi-node virt cluster: tests that require a second
-VM-capable node (live migration, node placement/anti-affinity) cannot pass with
-only one mshv node, and any VM the suite tries to pin to a non-mshv worker will
-fail (no `/dev/mshv`). For a fully meaningful checkup run the validation cluster
-should use an all-mshv worker pool with 2+ mshv nodes (no plain workers). The
-single-VM boot test in `issues/2026-08-31b-mshv-vm-boot-validation.md` remains the
-targeted signal for the kernel + CPU-model work.
+So gate 2 requires **every virt-handler node** to advertise the mshv + vhost-net
+devices. The plain D8 workers advertise `devices.kubevirt.io/mshv: 0` (no L1VH
+kernel, no `/dev/mshv`), so once virt-handler runs there (needed for gate 1),
+gate 2 fails.
+
+### The two gates are contradictory unless every worker is MSHV-capable
+
+- **Gate 1** (`WaitForWorkerNodesSchedulable`): virt-handler must run on **every**
+  non-control-plane node.
+- **Gate 2** (`EnsureHypervisorPresent`): **every** node running virt-handler must
+  advertise `devices.kubevirt.io/mshv > 0`.
+
+Together: **every non-control-plane (worker) node must be MSHV-capable** (L1VH
+kernel + `/dev/mshv`). This heterogeneous cluster (1 mshv D192 + 3 plain D8
+workers) cannot satisfy both, regardless of workload placement — pinning
+virt-handler to mshv fails gate 1; running it everywhere fails gate 2.
+
+Live evidence:
+
+```
+mshv node:    devices.kubevirt.io/mshv=1k  vhost-net=1k
+plain worker: devices.kubevirt.io/mshv=0
+```
+
+## What it takes to actually run the checkup (topology)
+
+The ocp-virt-validation-checkup is the upstream KubeVirt conformance suite and
+requires a homogeneous virt cluster. To run it against MSHV, **all worker nodes
+must be mshv nodes** — no plain/infra workers. Even a realistic "infra workers +
+mshv workers" split fails (the infra workers have no mshv device). Options:
+
+1. Provision the validation cluster with an all-mshv worker pool (2+ mshv nodes,
+   no default D8 workers) so both gates pass and multi-node tests (live
+   migration, placement) have somewhere to run. This is the correct topology.
+2. Scale the default worker MachineSets to 0 so the mshv node is the only worker
+   (consolidates registry/ingress/monitoring onto the mshv node + control plane;
+   watch ingress/registry replica anti-affinity and ARO worker minimums). This
+   lets the compute suite run but leaves a single VM node, so migration/multi-node
+   specs still can't pass.
+
+Keeping `scripts/07` free of the mshv-only placement is still correct (the mshv
+device constraint keeps VMs on mshv nodes, and it satisfies gate 1); the
+remaining blocker is purely the presence of non-mshv worker nodes. The single-VM
+boot test in `issues/2026-08-31b-mshv-vm-boot-validation.md` remains the targeted
+signal for the kernel + CPU-model work.
