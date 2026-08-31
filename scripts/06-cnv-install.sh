@@ -211,15 +211,28 @@ done
 # 8. Deploy HyperConverged CR
 # -----------------------------------------------
 log_info "Deploying HyperConverged CR..."
+# The virt-platform-autopilot component (Dev Preview in CNV 4.22) auto-applies a
+# KubeletConfig (virt-cpu-manager) and a swap MachineConfig to the worker pool.
+# Its KubeletConfig is invalid (memoryManagerPolicy=Static with reservedMemory
+# that does not match kubeReserved/systemReserved), so kubelet fails to start and
+# worker + mshv nodes go NotReady. See issues/2026-08-31.md. Use the autopilot's
+# documented Day-0 opt-out (platform.kubevirt.io/disabled-resources) to exclude
+# those two resources from the start. Remove this once the autopilot bug is fixed.
 cat <<EOF | oc apply -f -
 apiVersion: hco.kubevirt.io/v1beta1
 kind: HyperConverged
 metadata:
     name: kubevirt-hyperconverged
     namespace: openshift-cnv
+    annotations:
+        platform.kubevirt.io/disabled-resources: |
+            - kind: KubeletConfig
+              name: virt-cpu-manager
+            - kind: MachineConfig
+              name: 90-worker-swap-online
 spec: {}
 EOF
-log_ok "HyperConverged CR applied."
+log_ok "HyperConverged CR applied (autopilot virt-cpu-manager + swap MC excluded)."
 
 # -----------------------------------------------
 # 9. Wait for HyperConverged to become Available
