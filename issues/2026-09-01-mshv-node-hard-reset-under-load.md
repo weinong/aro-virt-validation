@@ -104,10 +104,39 @@ Immediately before each reset the kernel floods (rate-limited, 1000+ suppressed)
 enP30832s1 selects TX queue 172, but real number of TX queues is 32
 ```
 
-`enP30832s1` is the Azure accelerated-networking VF. The node has 192 CPUs but the
-NIC exposes 32 TX queues, so per-CPU queue selection picks indices > 31. This is a
-symptom of heavy VM network traffic and may or may not be involved in the host
-reset; worth flagging to the kernel/MSHV team as a correlated signal.
+`enP30832s1` is the Azure MANA accelerated-networking VF (`hv_netvsc eth0` is the
+synthetic failover pair). The node has 192 CPUs but the VF exposes 32 TX queues,
+so per-CPU queue selection picks indices > 31. **This is a benign, volume-
+independent warning** (it fires based on which CPU transmits, not throughput):
+`l7njd` logged **12017** of them without resetting, and measured throughput was
+trivial (see below). It is a red herring for the reset, worth flagging to the
+kernel team only as noise to fix.
+
+### Resource exhaustion ruled out (Prometheus, ~2h window)
+
+None of the usual suspects were anywhere near a limit on either node:
+
+```
+peak CPU utilization           bl5zw 0.67   l7njd 0.60      (not saturated)
+min MemAvailable               bl5zw 738 GiB l7njd 739 GiB  (of 755 — barely used)
+peak eth0 TX                   bl5zw 0.39 MB/s / 1708 pps   l7njd 0.85 MB/s / 2469 pps
+peak Geneve overlay TX pps     bl5zw 950    l7njd 68
+```
+
+Network throughput was **sub-1 MB/s** — this is not a load/throughput reset.
+Notably `l7njd` pushed *more* eth0 traffic than `bl5zw` yet never reset. The only
+dimensions where `bl5zw` led were **Geneve overlay packet rate (~14×)** and
+**VM count (3 vs 1)** — i.e. more MSHV guest lifecycle churn, not more load.
+
+### Refined trigger: MSHV guest lifecycle churn, not resource load
+
+With CPU/memory/network all low and no in-guest fault, the reset correlates with
+the **rate of MSHV L2 partition create/destroy operations** (each `virt-launcher`
+start issues `MSHV_CREATE_PARTITION` hypercalls to the L1 hypervisor). `bl5zw`
+cycled more VMs and reset repeatedly; `l7njd` cycled fewer and stayed up. The
+kernel was actively logging (MANA TX warnings) at the exact reset instant with no
+gap, so the L1VH partition was **hard-reset mid-operation by the host**, not hung.
+
 
 ## Impact
 
@@ -147,6 +176,9 @@ oc debug node/<mshv-node> -- chroot /host bash -c '
 - Investigate whether the accelerated-NIC TX-queue mismatch (192 CPU vs 32 queues)
   is a contributing trigger; note `l7njd` logged 12017 of the same warnings without
   resetting, so it is at most a co-factor, not the sole cause.
+- Reproduce with resource load ruled out: since CPU/memory/network were all low,
+  the driver is the MSHV L2 partition create/destroy path — a churn-focused repro
+  (rapidly start/stop many small VMs on one node) is the tightest reproducer.
 - The checkup cannot produce a clean full-suite result until the node stops
   resetting; the single-VM boot test remains the stable signal for the kernel +
   CPU-model work.
