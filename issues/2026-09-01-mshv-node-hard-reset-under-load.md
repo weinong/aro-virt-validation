@@ -350,6 +350,43 @@ Consequences, each verified:
 escalation. Nothing reachable from tenant RBAC or guest root contains the
 host's reason for the reset.
 
+### D) This is documented, by-design ARO behavior (not a misconfiguration)
+
+The empirically-observed deny above matches the published ARO contract, so the
+escalation path (support case → Red Hat/Microsoft) is the *only* sanctioned way
+to get host-side data — this is not something to "fix" on the cluster:
+
+- **Red Hat KB 7024799 — "Azure Red Hat OpenShift - Deny Assignment in
+  Resourcegroup"** (<https://access.redhat.com/solutions/7024799>): states that by
+  default you **cannot stop/start machines or modify resources** (VMs, disks,
+  NICs, storage accounts, etc.) in the managed resource group via the Azure
+  Portal or `az` CLI; the **DenyAssignment is documented and expected behavior**;
+  the **cluster service principal is the only identity excluded**, everything else
+  is denied. The example failure ("access is denied because of the deny
+  assignment … on `Microsoft.Compute/virtualMachines/write`") is exactly the
+  `LinkedAuthorizationFailed` / `DenyAssignmentAuthorizationFailed` we hit above.
+  Tracked upstream as RFE-6779. Root cause per the KB: the **Azure ARO-RP**
+  configures the DenyAssignment on the auto-generated managed RG.
+- **ARO Support Policy** (`support-policies-v4`,
+  <https://learn.microsoft.com/en-us/azure/openshift/support-policies-v4>):
+  modifying/managing the resources in the managed resource group is **unsupported**
+  and can void support — i.e. even the workarounds we ruled out above are
+  off-limits by policy, not just by the deny.
+- **ARO Responsibility Assignment Matrix**
+  (<https://learn.microsoft.com/en-us/azure/openshift/responsibility-matrix>):
+  **Worker nodes**, **Physical Infrastructure and Security**, and **Platform
+  monitoring** are **Microsoft + Red Hat** responsibilities (not the customer);
+  and for **Logging**, Microsoft/Red Hat "**Provide audit logs upon customer
+  request**" while the customer "**Request[s] platform audit logs through a
+  support case for researching specific incidents.**" The Hyper-V host reset of a
+  worker node's L1VH partition falls squarely in the Microsoft/Red Hat-owned
+  layers, and the sanctioned way to obtain the host-side evidence is a **support
+  case**, consistent with the deny assignment blocking direct tenant access.
+
+So the correct disposition here is to **open a Red Hat/Microsoft support case** for
+the host-side (Hyper-V) reset logs of `bl5zw` — the deny assignment is intended,
+documented behavior and there is no supported tenant-side path around it.
+
 ## Next steps
 
 - Report to bonzini / Red Hat MSHV + kernel team: the Azure Hyper-V host reset the
@@ -361,9 +398,12 @@ host's reason for the reset.
   MachineSet reprovisions it (Azure typically re-places on a different physical
   host). If the replacement is stable under the same VM load, it confirms a
   host-specific fault; if it also resets, it points to a density/kernel issue.
-- Ask Red Hat SRE for host-side (Hyper-V) reset logs / dumps and the physical host
-  ID for `bl5zw`, since ARO denies tenant access to VM run-command and boot
-  diagnostics.
+- **Open a Red Hat/Microsoft support case** for host-side (Hyper-V) reset logs /
+  dumps and the physical host ID for `bl5zw`. Per the ARO Responsibility Matrix and
+  KB 7024799 (see § D), the managed-RG deny assignment is by-design and the support
+  case is the *only* sanctioned path to host-side evidence — ARO denies tenant
+  access to VM run-command and boot diagnostics, and modifying managed-RG resources
+  is explicitly unsupported.
 - Investigate whether the accelerated-NIC TX-queue mismatch (192 CPU vs 32 queues)
   is a contributing trigger; note `l7njd` logged 12017 of the same warnings without
   resetting, so it is at most a co-factor, not the sole cause.
