@@ -14,6 +14,44 @@ The single-VM smoke test (`issues/2026-08-31b`) was stable; only **sustained
 multi-VM load** triggers the resets. The second MSHV node (`l7njd`) stayed up for
 90+ minutes because the checkup's test VMs were scheduled onto `bl5zw`.
 
+## Key contrast: the 2nd MSHV node is stable under the same kernel + storm
+
+`l7njd` is the same everything (kernel `…2798046552`, `Standard_D192ds_v6`,
+zone 1 / fault-domain 1, same OS layer) and it **did** run MSHV VMs and **did**
+see the identical accelerated-NIC warning storm — yet it never reset:
+
+| node  | uptime    | MSHV_CREATE_PARTITION | `selects TX queue >32` warnings | crash-reboots |
+| ----- | --------- | --------------------- | ------------------------------- | ------------- |
+| bl5zw | minutes   | many (dense)          | thousands                       | ~6 and counting |
+| l7njd | 105 min   | 9                     | 12017                           | 0             |
+
+So this is **not** "any MSHV VM / the TX-queue mismatch resets the node" — `l7njd`
+proves the same kernel, SKU, and NIC storm run fine. The differentiator is either:
+
+1. **`bl5zw`'s specific Azure Hyper-V host** is faulty/unstable for L1VH under load
+   (most likely — same guest config, only the physical host differs), or
+2. a **VM-density threshold**: `bl5zw` had the bulk of the test VMs scheduled onto
+   it; `l7njd` only ran 9. `bl5zw` may have crossed a per-host MSHV limit `l7njd`
+   never reached.
+
+Both point at a platform/host-side limitation under MSHV load, not a repo/kernel
+software bug (the kernel would have panicked; it didn't).
+
+### Prometheus telemetry (corroboration)
+
+```
+changes(node_boot_time_seconds[6h])            bl5zw = 6 reboots   l7njd = 0
+max_over_time(count virt-launcher by node)     bl5zw peak = 3 VMs  l7njd peak = 1 VM
+```
+
+`bl5zw` peaked at only **3 concurrent VMs** — trivial for a 192‑vCPU / 755 GiB
+node — yet still reset 6 times, while `l7njd` ran VMs with zero reboots. A per-host
+capacity limit of ~3 VMs is implausibly low, so the evidence leans toward
+**`bl5zw`'s underlying Azure Hyper-V host being faulty for L1VH** rather than a
+generic density limit.
+
+
+
 ## The reset comes from below the guest kernel (Hyper-V host), not a kernel panic
 
 Evidence that this is a host/hypervisor-level reset of the L1VH partition, not an
@@ -94,15 +132,21 @@ oc debug node/<mshv-node> -- chroot /host bash -c '
 
 ## Next steps
 
-- Report to bonzini / Red Hat MSHV + kernel team: the Azure Hyper-V host resets
-  the L1VH partition when its MSHV guests run under sustained load, with no
-  in-guest panic. Provide the crash cadence, the "no panic / no watchdog" ruling,
-  the host build (`10.0.26102.3641`), and the L1VH kernel NVR.
-- Ask Red Hat SRE for host-side (Hyper-V) reset logs / dumps for `bl5zw`, since
-  ARO denies tenant access to VM run-command and boot diagnostics.
+- Report to bonzini / Red Hat MSHV + kernel team: the Azure Hyper-V host reset the
+  L1VH partition `bl5zw` under MSHV guest load, with no in-guest panic, while an
+  identical node `l7njd` (same kernel/SKU) stayed stable. Provide the crash cadence,
+  the "no panic / no watchdog / no MCE" ruling, the host build (`10.0.26102.3641`),
+  the L1VH kernel NVR, and the bl5zw-vs-l7njd contrast.
+- **Cheapest test of the bad-host hypothesis**: delete the `bl5zw` Machine so the
+  MachineSet reprovisions it (Azure typically re-places on a different physical
+  host). If the replacement is stable under the same VM load, it confirms a
+  host-specific fault; if it also resets, it points to a density/kernel issue.
+- Ask Red Hat SRE for host-side (Hyper-V) reset logs / dumps and the physical host
+  ID for `bl5zw`, since ARO denies tenant access to VM run-command and boot
+  diagnostics.
 - Investigate whether the accelerated-NIC TX-queue mismatch (192 CPU vs 32 queues)
-  is a contributing trigger; test with accelerated networking disabled or a
-  smaller SKU as a bisection.
+  is a contributing trigger; note `l7njd` logged 12017 of the same warnings without
+  resetting, so it is at most a co-factor, not the sole cause.
 - The checkup cannot produce a clean full-suite result until the node stops
   resetting; the single-VM boot test remains the stable signal for the kernel +
   CPU-model work.
