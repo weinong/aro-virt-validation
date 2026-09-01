@@ -25,6 +25,17 @@ see the identical accelerated-NIC warning storm — yet it never reset:
 | bl5zw | minutes   | many (dense)          | thousands                       | ~6 and counting |
 | l7njd | 105 min   | 9                     | 12017                           | 0             |
 
+Reproduce the per-node counts (run for each `NODE`):
+
+```sh
+NODE=aro-virt-test-8gpzs-worker-mshv-centralus1-l7njd   # then repeat for bl5zw
+oc debug node/$NODE -- chroot /host bash -c '
+  echo "uptime: $(uptime)"
+  echo "MSHV_CREATE_PARTITION: $(journalctl -k --no-pager | grep -c MSHV_CREATE_PARTITION)"
+  echo "TX-queue>32 warnings:  $(journalctl -k --no-pager | grep -c "selects TX queue")"
+  echo "crash reboots:"; journalctl --list-boots --no-pager | tail -8'
+```
+
 So this is **not** "any MSHV VM / the TX-queue mismatch resets the node" — `l7njd`
 proves the same kernel, SKU, and NIC storm run fine. The differentiator is either:
 
@@ -38,6 +49,17 @@ Both point at a platform/host-side limitation under MSHV load, not a repo/kernel
 software bug (the kernel would have panicked; it didn't).
 
 ### Prometheus telemetry (corroboration)
+
+Reproduce (Prometheus harness defined in "How to reproduce" → B, below):
+
+```sh
+# reboots per mshv node over 6h
+promql 'changes(node_boot_time_seconds{instance=~".*mshv.*"}[6h])'
+# peak concurrent virt-launcher pods (VM density) per node over 3h
+promql 'max_over_time(count(kube_pod_info{pod=~"virt-launcher.*"}) by (node)[3h:1m])'
+```
+
+Result:
 
 ```
 changes(node_boot_time_seconds[6h])            bl5zw = 6 reboots   l7njd = 0
@@ -55,22 +77,43 @@ generic density limit.
 ## The reset comes from below the guest kernel (Hyper-V host), not a kernel panic
 
 Evidence that this is a host/hypervisor-level reset of the L1VH partition, not an
-in-guest crash:
+in-guest crash. Reproduce each with `oc debug node/bl5zw -- chroot /host bash -c '<cmd>'`:
 
 - **No kernel panic / oops / soft-lockup / Call Trace** anywhere before each reset.
   Every boot's last log lines are ordinary VM network activity, then the log ends
   abruptly with no shutdown sequence.
+  ```sh
+  # count panic indicators in the previous boot (returns 0), then eyeball the abrupt end:
+  journalctl -b -1 --no-pager | grep -icE "kernel panic|BUG:|Oops|soft lockup|hard LOCKUP|rcu.*stall|watchdog:|general protection|unable to handle kernel|Call Trace"
+  journalctl -b -1 --no-pager | grep -icE "Reached target.*(Shutdown|Reboot)|systemd-shutdown|Stopping .* kubelet"   # 0 = no clean shutdown
+  journalctl -b -1 --no-pager | tail -20   # last lines are TX-queue warnings, then nothing
+  ```
 - `sysctl kernel.panic_on_oops = 1`, `kernel.panic = 10` — a real oops/panic would
   **print a stack trace and delay 10s** before rebooting. The abrupt end with no
   trace and no 10s delay rules out an in-guest panic.
+  ```sh
+  sysctl kernel.panic_on_oops kernel.panic kernel.softlockup_panic kernel.hung_task_timeout_secs
+  ```
 - `RuntimeWatchdogUSec = 0` and no `/dev/watchdog*` device — **not** a
-  software/hardware watchdog reset either.
+  software/hardware watchdog reset either. No MCE / hardware error in any boot.
+  ```sh
+  systemctl show -p RuntimeWatchdogUSec; ls -la /dev/watchdog* 2>/dev/null || echo "no watchdog dev"
+  journalctl -k --no-pager | grep -icE "mce|machine check|Hardware Error|GHES|CPER"   # 0
+  ```
 - The node boots as `Hyper-V: running as L1VH partition` (Azure Hyper-V,
   `Host Build 10.0.26102.3641`). With no guest panic and no watchdog, the reset
   originates from the Hyper-V host / L1 hypervisor resetting the L1VH partition
   when its MSHV (L2) guests run under load.
+  ```sh
+  journalctl -k --no-pager | grep -iE "L1VH|Hyper-V:|Host Build" | head
+  ```
 
 ### Crash cadence (boot end = reset time), correlated with VM load
+
+```sh
+oc debug node/aro-virt-test-8gpzs-worker-mshv-centralus1-bl5zw -- \
+  chroot /host journalctl --list-boots --no-pager | tail -8
+```
 
 ```
 -6  2026-08-31 20:14 -> 23:20   (stable 3h — BEFORE the checkup created VMs here)
@@ -83,9 +126,26 @@ in-guest crash:
 ```
 
 The resets began at 23:20, exactly when the checkup started scheduling
-`hyperv-direct` test VMs onto `bl5zw`. Each boot ends during heavy VM traffic.
+`hyperv-direct` test VMs onto `bl5zw` (confirm which node ran the VMs with
+`oc get pods -A -o wide | grep virt-launcher | awk '{print $8}' | sort | uniq -c`).
+Each boot ends during heavy VM traffic. The **last kernel line sits at the exact
+reset second with no silent gap** (kernel was busy, not hung):
+
+```sh
+oc debug node/aro-virt-test-8gpzs-worker-mshv-centralus1-bl5zw -- chroot /host bash -c '
+  for b in -1 -2 -3; do journalctl -b $b -k --no-pager -o short-precise | tail -1; done'
+# -> ...00:33:52.60  kernel: enP30832s1 selects TX queue 172 ...   (then reset; new boot ~00:34)
+```
 
 ### Node facts
+
+```sh
+oc debug node/aro-virt-test-8gpzs-worker-mshv-centralus1-bl5zw -- chroot /host bash -c '
+  uptime; free -g | head -2
+  journalctl -k --no-pager | grep -iE "L1VH|Nested features|Host Build|Disabling IBT"'
+oc get machine -n openshift-machine-api aro-virt-test-8gpzs-worker-mshv-centralus1-bl5zw \
+  -o jsonpath="{.spec.providerSpec.value.vmSize} zone={.spec.providerSpec.value.zone}{\"\n\"}"
+```
 
 - Kernel: `6.12.0-211.49.1.1794_2798046552.el10_2` (bonzini L1VH), RHCOS 10.2.
 - `Hyper-V: running as L1VH partition`, `Nested features: 0x0`,
@@ -110,17 +170,35 @@ so per-CPU queue selection picks indices > 31. **This is a benign, volume-
 independent warning** (it fires based on which CPU transmits, not throughput):
 `l7njd` logged **12017** of them without resetting, and measured throughput was
 trivial (see below). It is a red herring for the reset, worth flagging to the
-kernel team only as noise to fix.
+kernel team only as noise to fix. Note there is **no VF revoke / adapter reset /
+`hv_pci` / `vmbus` device event** — the NIC is not failing:
+
+```sh
+oc debug node/aro-virt-test-8gpzs-worker-mshv-centralus1-bl5zw -- chroot /host bash -c '
+  journalctl -b -1 -k --no-pager | grep -iE "mana |hv_netvsc|hv_pci|vmbus|VF (registered|slot|unregister|removed)|Data path switched|reset adapter" | tail
+  journalctl -b -1 -k --no-pager | grep -c "selects TX queue"'   # thousands of the benign warning
+```
 
 ### Resource exhaustion ruled out (Prometheus, ~2h window)
 
-None of the usual suspects were anywhere near a limit on either node:
+None of the usual suspects were anywhere near a limit on either node. Reproduce
+(Prometheus harness in "How to reproduce" → B):
+
+```sh
+promql 'max_over_time( (1 - avg by (instance)(rate(node_cpu_seconds_total{mode="idle",instance=~".*mshv.*"}[2m]))) [120m:1m] )'
+promql 'min_over_time( (node_memory_MemAvailable_bytes{instance=~".*mshv.*"}/1073741824) [120m:1m] )'
+# find which iface carries VM traffic, then compare nodes:
+promql 'topk(6, max_over_time( (rate(node_network_transmit_bytes_total{instance=~".*mshv.*",device!~"lo|veth.*|.*@.*"}[1m])/1048576) [120m:1m] ))'
+promql 'topk(6, max_over_time( (rate(node_network_transmit_packets_total{instance=~".*mshv.*",device!~"lo|veth.*"}[1m])) [120m:1m] ))'
+```
+
+Result:
 
 ```
-peak CPU utilization           bl5zw 0.67   l7njd 0.60      (not saturated)
-min MemAvailable               bl5zw 738 GiB l7njd 739 GiB  (of 755 — barely used)
-peak eth0 TX                   bl5zw 0.39 MB/s / 1708 pps   l7njd 0.85 MB/s / 2469 pps
-peak Geneve overlay TX pps     bl5zw 950    l7njd 68
+peak CPU utilization           bl5zw 0.67    l7njd 0.60      (not saturated)
+min MemAvailable               bl5zw 738 GiB l7njd 739 GiB   (of 755 — barely used)
+peak eth0 TX                   bl5zw 0.39 MB/s / 1708 pps    l7njd 0.85 MB/s / 2469 pps
+peak Geneve overlay TX pps     bl5zw 950     l7njd 68        (device genev_sys_6081)
 ```
 
 Network throughput was **sub-1 MB/s** — this is not a load/throughput reset.
@@ -148,15 +226,63 @@ gap, so the L1VH partition was **hard-reset mid-operation by the host**, not hun
 - This is a **platform/L1VH stability issue under load**, not a repo or cluster
   misconfiguration.
 
-## Diagnosis commands
+## How to reproduce
+
+Prereqs: `oc` logged in as cluster-admin against this cluster
+(`make aro-login`, or `az aro get-admin-kubeconfig -g <rg> -n <cluster> -f ./kubeconfig
+&& export KUBECONFIG=$PWD/kubeconfig`), plus `curl` and `jq`.
+
+### A) Node kernel/journal evidence
+
+RHCOS journald is **persistent** (`/var/log/journal/` exists), so the crashed
+boots are retained and inspectable after the fact via a debug pod:
 
 ```sh
-oc debug node/<mshv-node> -- chroot /host bash -c '
-  uptime; journalctl --list-boots --no-pager | tail -8
-  sysctl kernel.panic_on_oops kernel.panic; cat /proc/sys/kernel/... 
-  journalctl -b -1 --no-pager | grep -iE "panic|Oops|lockup|Call Trace|shutdown" | tail
-  journalctl -b -1 --no-pager | tail -20   # ends abruptly, no panic/shutdown
-  dmesg | grep -iE "L1VH|Hyper-V|Host Build"'
+NODE=aro-virt-test-8gpzs-worker-mshv-centralus1-bl5zw    # the crashing node
+oc debug node/$NODE -- chroot /host bash -c '<command>'
+```
+
+Confirm which node the checkup VMs landed on (that is the one that crashes):
+
+```sh
+oc get pods -A -o wide | grep virt-launcher | awk "{print \$8}" | sort | uniq -c
+```
+
+The exact per-claim commands are inlined next to each finding above (crash cadence,
+no-panic/oops, watchdog/MCE ruling, last-kernel-line-at-reset, MANA/VF check).
+
+### B) Prometheus / PromQL harness
+
+The in-cluster monitoring stack retains ~15 days. Query it through the
+`thanos-querier` route with a short-lived token for the `prometheus-k8s` SA:
+
+```sh
+TOKEN=$(oc create token prometheus-k8s -n openshift-monitoring --duration=15m)
+THANOS=$(oc get route thanos-querier -n openshift-monitoring -o jsonpath='{.spec.host}')
+promql() {
+  curl -sk -H "Authorization: Bearer $TOKEN" \
+    --data-urlencode "query=$1" "https://$THANOS/api/v1/query" \
+  | jq -r '.data.result[] | "\(.metric.instance // .metric.node // .metric.device // "?")\t\(.value[1])"'
+}
+# examples (all queries used above accept this helper):
+promql 'changes(node_boot_time_seconds{instance=~".*mshv.*"}[6h])'
+```
+
+(The bracketed `[…:1m]` subquery ranges in the queries above are relative to "now";
+widen the outer range or use the `/api/v1/query_range` endpoint with explicit
+`start`/`end` epochs to target the historical reset window, e.g.
+`--data-urlencode start=$(date -d '2026-08-31T23:10Z' +%s)`.)
+
+### C) Azure host-side (blocked here)
+
+`az vm run-command` and `az vm boot-diagnostics get-boot-log[-uris]` against the
+node VMs both fail with `DenyAssignmentAuthorizationFailed` — ARO applies a deny
+assignment on the managed resource group. Host-side Hyper-V reset logs / dumps and
+the physical host ID require Red Hat SRE / Azure engagement:
+
+```sh
+MRG=$(az aro show -g <rg> -n <cluster> --query clusterProfile.resourceGroupId -o tsv | sed 's#.*/##')
+az vm boot-diagnostics get-boot-log-uris -g "$MRG" -n $NODE   # -> DenyAssignmentAuthorizationFailed
 ```
 
 ## Next steps
