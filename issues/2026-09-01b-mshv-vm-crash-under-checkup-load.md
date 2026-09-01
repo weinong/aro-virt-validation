@@ -1,20 +1,50 @@
-# 2026-09-01 — MSHV/L1VH guest VMs crash intermittently under checkup load (the "console slowness" is a symptom)
+# 2026-09-01 — Compute suite on `l7njd`: VM crashes were the node hard-resetting (+ a separate console-stall)
 
-## Summary
+> **⚠️ CORRECTION (added after the run finished).** This note was first written
+> mid-run under the belief that `l7njd` was a *stable* node and the VM crashes were
+> independent guest/qemu instability. **That was wrong.** After the run, `l7njd`'s
+> own `journalctl --list-boots` showed it **hard-reset repeatedly starting ~15:47**
+> (≈87 min into the compute suite) — the *same* L1VH-under-load reset as `bl5zw`
+> (see `issues/2026-09-01-mshv-node-hard-reset-under-load.md`, CORRECTION block).
+> The "`l7njd` = 0 reboots" reading was a monitoring artifact: **`prometheus-k8s-0`
+> runs on `l7njd`** and was taken down by the resets, so it never recorded them.
+>
+> Consequences for this note, section by section:
+> - The **bulk of the failures** (the growing `The VirtualMachineInstance crashed`
+>   / `phase is not Running` / `guest didn't reboot` cluster from ~88 min on) are
+>   **downstream of `l7njd` hard-resetting** — when the L1VH node resets, every VM
+>   on it dies at once. This is **not** independent "guest instability on a healthy
+>   node"; it is the node-reset issue, now shown on `l7njd` too.
+> - The **early `test_id:1528` console stalls (14:37–14:41)** *did* occur while
+>   `l7njd`'s boot was continuously up (boot `-4`, 23:02→15:47), so they are a
+>   **genuinely separate, still-open** intermittent serial-console/VM-stall
+>   phenomenon that the reset does not explain. The boot/console rule-outs below
+>   (probe VM booted fine, serial healthy) were also collected during that stable
+>   window and remain valid.
+> - The **`l7njd` stayed stable / re-confirms bl5zw is host-specific** section is
+>   **retracted** — see the replacement section below.
+>
+> Net: this file is retained for the console-stall characterization and the taint
+> methodology; its original "healthy node" thesis is superseded by the node-reset
+> finding.
 
-While running the ocp-virt-validation-checkup **compute** suite pinned to the
-*stable* MSHV node `aro-virt-test-8gpzs-worker-mshv-centralus1-l7njd` (see
-`issues/2026-09-01-mshv-node-hard-reset-under-load.md` for why the other MSHV node
-`bl5zw` was excluded), the suite still produces a cluster of failures — **~15 and
-counting at 88 min** — that all trace back to **individual guest VMs crashing
-intermittently** (`The VirtualMachineInstance crashed.` → VMI `phase=Failed`).
+## Summary (corrected)
 
-The node itself never reset (`l7njd` = **0 reboots in 3h** under the full VM
-churn), so this is a **guest/qemu-level instability on MSHV under load**, distinct
-from the `bl5zw` host-reset problem. Crucially, what first looked like "serial
-console slowness" in the `[test_id:1528] should survive guest shutdown, multiple
-times` spec turned out to be a **downstream symptom** of these VM crashes, not a
-console problem.
+The ocp-virt-validation-checkup **compute** suite was pinned to the MSHV node
+`aro-virt-test-8gpzs-worker-mshv-centralus1-l7njd` (by tainting `bl5zw`
+`NoSchedule`) to isolate it from the reset-prone `bl5zw`. Two things happened:
+
+1. **Early, during confirmed-stable operation (~14:37–14:41):** a handful of
+   `[test_id:1528] should survive guest shutdown, multiple times` failures that
+   present as "serial console slowness." These are **not** slow boot or console
+   echo lag (ruled out below); root cause is **still open** and was not
+   reproducible in isolation.
+2. **From ~87 min in (~15:47 onward):** a growing cluster of `The
+   VirtualMachineInstance crashed` / `phase is not Running` / `guest didn't reboot`
+   failures — which turned out to be **`l7njd` itself hard-resetting under the
+   load** (same issue as `bl5zw`), killing all its VMs and ultimately the test
+   runner pod (`Exit Code 137`) at ~16:06. See the replacement section
+   "What actually happened at ~87 min: `l7njd` reset" below.
 
 ## The "console slowness" is not console slowness
 
@@ -40,9 +70,14 @@ ends in a console EOF + reconnect, after which login succeeds instantly**:
 14:37:38  "localhost login:" matches      <- login now instant after reconnect
 ```
 
-That is `goexpect` **blocking on a serial stream whose qemu died mid-test**, until
-the stream EOFs and the test reconnects to the *replacement* VMI. The console was
-never "slow" — the VM behind it crashed.
+That is `goexpect` **blocking on a serial-console stream that hung for ~3 min**,
+until the stream EOFs, the test reconnects to the VMI, and the (healthy) guest's
+`login:` appears instantly. Note the guest **recovered** here — so for this early,
+stable-window case it is a **serial-console stream stall, not a guest/qemu crash**
+and not slow boot. The console was not "slow" in the echo-latency sense; the
+stream stalled entirely, then resumed on reconnect. Root cause remains open (see
+the open-items section). (This is distinct from the later failures, where the VMs
+died because the whole node reset.)
 
 ### Ruled out: slow guest boot
 
@@ -81,9 +116,15 @@ includes `LoginToAlpine`'s fixed 5 s newline wait). So it is binary: **either a
 fast/healthy console, or a full multi-minute stall when the VM crashes** — never
 gradual lag.
 
-## The underlying failure: VMs crash under load (on a healthy node)
+## The failure cluster from ~87 min: VMs die because the node resets
 
-The 15 failures share one root cause — VMs not staying Running:
+> **Corrected framing.** This cluster of failures is **downstream of `l7njd`
+> hard-resetting** (see the correction banner and the replacement section below),
+> not independent guest instability. When the L1VH partition resets, every VM on
+> it dies simultaneously — which is exactly what these signatures show.
+
+The failures from ~88 min on share one proximate symptom — VMs not staying
+Running:
 
 | failure signature (job log)                                   | meaning                                  |
 | ------------------------------------------------------------- | ---------------------------------------- |
@@ -102,32 +143,50 @@ $ oc get vmi -n kubevirt-test-default1 -o json | jq -r '.items[]|select(.status.
 testvmi-wpn9f-... Failed
 ```
 
-The **qemu-level crash reason has not yet been captured** — the virt-launcher pods
-(including the `compute` and `guest-console-log` containers that would hold the
-qemu/libvirt logs and any in-guest panic) are torn down immediately on crash, so
-grabbing them requires either catching a crash live at the right instant or
-deliberately reproducing a crash on a probe VM. **This is an open item, not a
-resolved root cause.** Candidate directions to investigate: the `Nehalem`
-`defaultCPUModel` (set in `scripts/07a-hco-default-cpu-model.sh`), the MSHV L2
-guest path under rapid lifecycle churn, or the specific operations the failing
-specs perform (guest reboot, freeze/unfreeze, shutdown loops).
+The **qemu-level crash reason was not separately captured** — but the correction
+below shows why: the "crashes" are the **node resetting under it**, so there is no
+per-VM qemu fault to find for that cluster. (A genuinely separate, still-open item
+is the early `test_id:1528` console stall during confirmed-stable operation.)
 
-## Node stayed stable (re-confirms bl5zw is host-specific)
+## What actually happened at ~87 min: `l7njd` reset (retraction of "node stayed stable")
 
-Throughout the run, `l7njd` never reset:
+**Retracted claim:** an earlier version of this note asserted `l7njd` "never reset
+(0 reboots in 3h)" and concluded the crashes proved a *guest* issue on a *healthy*
+node, distinct from `bl5zw`'s host resets. **Both halves are false.**
+
+`l7njd`'s own boot history (authoritative — the node's persistent journal, not
+Prometheus) shows it hard-reset repeatedly once the compute suite loaded it:
 
 ```sh
-TOKEN=$(oc create token prometheus-k8s -n openshift-monitoring --duration=15m)
-THANOS=$(oc get route thanos-querier -n openshift-monitoring -o jsonpath='{.spec.host}')
-curl -sk -H "Authorization: Bearer $TOKEN" \
-  --data-urlencode 'query=changes(node_boot_time_seconds{instance=~".*mshv.*"}[3h])' \
-  "https://$THANOS/api/v1/query" | jq -r '.data.result[]|"\(.metric.instance) \(.value[1])"'
-# -> bl5zw 0   l7njd 0
+oc debug node/aro-virt-test-8gpzs-worker-mshv-centralus1-l7njd -- \
+  chroot /host journalctl --list-boots --no-pager | tail -6
+# -4  Aug31 23:02 -> Sep01 15:47   (~16.7h up, but idle of heavy VM churn)
+# -3  15:48 -> 15:52   (~4 min)     <- compute suite pinned here 14:20; ~87 min to 1st reset
+# -2  15:52 -> 16:06   (~14 min)
+# -1  16:06 -> 16:09   (~3 min)
+#  0  16:10 -> ...
 ```
 
-So the compute suite fully exercised `l7njd` with the same VM churn that
-hard-resets `bl5zw`, and `l7njd` stayed up — the VM crashes here are a *guest*
-issue, and `bl5zw`'s node resets remain a *host*-specific issue.
+Each reset boot ends abruptly (no clean shutdown, no in-guest panic) with the same
+MANA `enP30832s1 selects TX queue N, but real number of TX queues is 32` storm as
+`bl5zw` — i.e. the **identical L1VH-under-load reset signature**. The test runner
+pod was killed by these resets with `Exit Code 137` /
+`ContainerStatusUnknown: The container could not be located`, and the job ended
+`Failed` at ~106 min with **no results ConfigMap written**.
+
+**Why the original "0 reboots" reading was wrong:** the check used
+`changes(node_boot_time_seconds[3h])` via Prometheus, but **`prometheus-k8s-0`
+runs on `l7njd`** and was taken down by the resets, so the monitoring stack never
+scraped the new boot times. Always cross-check node resets with the node's own
+`uptime` / `journalctl --list-boots`.
+
+**Corrected conclusion:** the mass VM "crashes" here are the **same node-reset
+issue as `bl5zw`, now demonstrated on `l7njd`** — see
+`issues/2026-09-01-mshv-node-hard-reset-under-load.md`. Both MSHV nodes are stable
+when idle and reset under sustained MSHV load; `l7njd` merely tolerated ~87 min of
+compute-suite churn before its first reset (and `bl5zw`, once tainted and idle,
+stayed up 15h39m). What remains genuinely *separate and open* is only the early
+`test_id:1528` serial-console stall observed during `l7njd`'s stable window.
 
 ## Test intervention used (NOT a fix)
 
@@ -185,35 +244,44 @@ oc get vmi -n kubevirt-test-default1 -o json \
   | jq -r '.items[]|select(.status.phase!="Running")|"\(.metadata.name) \(.status.phase)"'
 ```
 
-### C) Confirm boot / console are healthy in isolation (rule-outs)
+### C) Confirm boot / console are healthy in isolation (rule-outs, stable window only)
 
-Create a `RunStrategy: Always` probe VM pinned to the stable node and measure
+Create a `RunStrategy: Always` probe VM pinned to the node and measure
 reboot→AgentConnected latency (race-free via VMI UID change) and serial-console
-responsiveness — both are healthy, proving the checkup failures are crashes, not
-slow boot or slow console. (Harness used: `/tmp/opencode/reboot-latency.py` and
-the inline `virtctl restart`/`virtctl console` loops; the probe VM lives in the
-`console-latency` namespace.)
+responsiveness. During `l7njd`'s stable window these were **healthy** (12 reboots
+booted to guest-agent in 37–97 s, no multi-minute stall; serial console returned
+the login prompt in 6/6 checks) — which is what rules out *slow boot* and *console
+echo lag* for the early `test_id:1528` stall. (Harness: `/tmp/opencode/reboot-latency.py`
+and inline `virtctl restart`/`virtctl console` loops; probe VM in the
+`console-latency` namespace.) NB: these rule-outs say nothing about the later
+failures, which were the node resetting.
 
 ## Impact
 
-- The compute suite cannot produce a clean result on MSHV even on a **healthy
-  host**: intermittent guest VM crashes fail multiple compute specs
-  (`test_id:1528` and the `phase is not Running` / guest-reboot family), and the
-  `flake-attempts=3` retries are consumed by the crashes.
-- The `bl5zw` node-reset issue and this guest-crash issue are **two independent
-  MSHV/L1VH problems**; fixing the host that resets `bl5zw` would still leave
-  these guest crashes.
+- The compute suite **cannot produce a clean result on MSHV**: the run on `l7njd`
+  was destroyed by `l7njd` **hard-resetting under the load** (~87 min in, then
+  repeatedly), which killed the test VMs and the test runner pod (`Exit Code 137`)
+  and left no results ConfigMap.
+- This is the **same L1VH-under-load node-reset problem** as `bl5zw`, not a
+  separate "guest crash" issue — see `issues/2026-09-01-mshv-node-hard-reset-under-load.md`.
+  The only genuinely separate, still-open observation here is the early
+  `test_id:1528` serial-console stall seen during confirmed-stable operation.
 
 ## Open items / next steps
 
-- **Capture the qemu-level crash reason** (primary open item): catch a crashing
-  virt-launcher's `compute` + `guest-console-log` container logs at the instant of
-  crash, or reproduce a crash on a long-lived probe VM (reboot/freeze/shutdown
-  loops) so the launcher logs can be read at leisure. Look for a guest kernel
-  panic vs a qemu/libvirt abort vs an MSHV hypercall error.
-- Test whether the crashes correlate with the `Nehalem` `defaultCPUModel`, with a
-  specific operation (guest-initiated reboot, `freeze`/`unfreeze`), or with
-  concurrency/churn rate.
-- Report to the CNV/KubeVirt MSHV team with the crash reason once captured, plus
-  the `l7njd`-stable-node context (rules out host/hardware).
+- **Primary:** this folds into the node-reset issue
+  (`issues/2026-09-01-mshv-node-hard-reset-under-load.md`) — both MSHV nodes reset
+  under sustained load; pursue the host-side reset root cause via the Red Hat /
+  Microsoft support case described there.
+- **Separate open item — the early `test_id:1528` console stall:** during `l7njd`'s
+  confirmed-stable window (14:37–14:41), the post-`poweroff` replacement VMI's
+  serial `login:` intermittently stalled ~3 min then recovered after a console
+  EOF+reconnect. Not slow boot, not echo lag (ruled out above), and not reproduced
+  in isolation. Needs a dedicated repro (guest poweroff/reboot loops on an
+  otherwise-idle node, watching for the serial stream to hang while the guest is
+  up). Candidate factors: the `Nehalem` `defaultCPUModel`, serial-console
+  proxy/mshv ttyS0 handling under churn.
+- **Methodology note:** never rely on Prometheus alone for node-reset counts on a
+  single-node-pinned run — the monitoring pod may be on the node that resets.
+  Cross-check with `uptime` / `journalctl --list-boots` on the node.
 - Revert the `bl5zw` `NoSchedule` taint when the isolation experiment is done.

@@ -1,4 +1,9 @@
-# 2026-09-01 — MSHV/L1VH node hard-resets under KubeVirt conformance load (no in-guest panic)
+# 2026-09-01 — MSHV/L1VH nodes hard-reset under KubeVirt conformance load (no in-guest panic)
+
+> **TL;DR (corrected):** MSHV/L1VH worker nodes hard-reset under sustained
+> OpenShift Virtualization load. Originally thought to be one bad host (`bl5zw`),
+> but the second node (`l7njd`) **also** resets once it carries the load — see the
+> CORRECTION block below. This is a general L1VH-under-load reset, no in-guest panic.
 
 ## Summary
 
@@ -11,10 +16,69 @@ cluster level as the node flapping `Ready=Unknown`; on the node it is an actual
 reboot (`uptime` resets, new boot IDs).
 
 The single-VM smoke test (`issues/2026-08-31b`) was stable; only **sustained
-multi-VM load** triggers the resets. The second MSHV node (`l7njd`) stayed up for
-90+ minutes because the checkup's test VMs were scheduled onto `bl5zw`.
+multi-VM load** triggers the resets.
 
-## Key contrast: the 2nd MSHV node is stable under the same kernel + storm
+## ⚠️ CORRECTION (2026-09-01, later run): BOTH MSHV nodes reset — this is not a bad-host
+
+An initial reading of this issue (preserved below) concluded that `bl5zw` was a
+uniquely faulty host because the second MSHV node `l7njd` "stayed stable under the
+same kernel + load." **That conclusion was wrong.** It was an artifact of `l7njd`
+not actually being under sustained VM load at the time (the first checkup run
+scheduled the bulk of VMs onto `bl5zw`).
+
+When the checkup **compute** suite was later pinned entirely to `l7njd` (by
+tainting `bl5zw` `NoSchedule`; see `issues/2026-09-01b`), `l7njd` **also
+hard-reset — repeatedly — with the identical signature** (abrupt reset, no clean
+shutdown, no in-guest panic, MANA `selects TX queue …` storm as the last kernel
+line). It simply tolerated far more load before failing:
+
+```
+l7njd boot history (journalctl --list-boots):
+ -4  Aug31 23:02 -> Sep01 15:47   (~16.7h up — but essentially idle of VM churn)
+ -3  15:48 -> 15:52   (~4 min)     <- compute suite pinned here at 14:20;
+ -2  15:52 -> 16:06   (~14 min)       first reset ~87 min in, then repeated
+ -1  16:06 -> 16:09   (~3 min)
+  0  16:10 -> ...
+```
+
+Meanwhile `bl5zw`, once tainted and thus **idle**, stayed **up 15h39m** with zero
+resets. So the corrected conclusion is symmetric and load-driven:
+
+> **Both MSHV/L1VH nodes are stable when idle and hard-reset under sustained MSHV
+> L2 guest churn**, on this platform, with the same signature. The per-host
+> difference is only **time-to-first-reset** (`bl5zw` within minutes; `l7njd`
+> ~87 min of compute-suite churn), which may reflect host variability or the
+> lighter compute-only load on `l7njd` vs. compute+network+storage on `bl5zw`.
+
+This is therefore a **general L1VH-under-load partition-reset bug**, not a single
+bad host. The `bl5zw`-vs-`l7njd` "contrast" section below is **retained for the
+record but its bad-host conclusion is superseded by this correction**. Note also
+that the Prometheus `changes(node_boot_time_seconds)` readings that showed `l7njd
+= 0 reboots` were unreliable: **`prometheus-k8s-0` runs on `l7njd`** and was taken
+down by the very resets it should have recorded, so the monitoring stack missed
+them. The node's own `journalctl --list-boots` / `uptime` is authoritative.
+
+Reproduce the correction (run for `l7njd`):
+
+```sh
+oc debug node/aro-virt-test-8gpzs-worker-mshv-centralus1-l7njd -- chroot /host bash -c '
+  uptime
+  journalctl --list-boots --no-pager | tail -8
+  # each reset boot ends abruptly with the MANA storm, no clean shutdown:
+  journalctl -b -1 -k --no-pager -o short-precise | tail -2
+  journalctl -b -1 --no-pager | grep -icE "systemd-shutdown|Reached target.*Shutdown"   # 0
+  journalctl -b -1 --no-pager | grep -icE "kernel panic|Call Trace|machine check|mce:"  # 0 real'
+```
+
+---
+
+The original (now-superseded on the bad-host point) analysis follows.
+
+## Key contrast (SUPERSEDED — see correction above): the 2nd node *looked* stable
+
+> **Superseded:** the table/conclusion in this section reflect the moment when
+> `l7njd` was not yet under sustained load. `l7njd` later reset repeatedly under
+> the compute suite (see the CORRECTION block at the top). Kept for the record.
 
 `l7njd` is the same everything (kernel `…2798046552`, `Standard_D192ds_v6`,
 zone 1 / fault-domain 1, same OS layer) and it **did** run MSHV VMs and **did**
@@ -36,17 +100,12 @@ oc debug node/$NODE -- chroot /host bash -c '
   echo "crash reboots:"; journalctl --list-boots --no-pager | tail -8'
 ```
 
-So this is **not** "any MSHV VM / the TX-queue mismatch resets the node" — `l7njd`
-proves the same kernel, SKU, and NIC storm run fine. The differentiator is either:
-
-1. **`bl5zw`'s specific Azure Hyper-V host** is faulty/unstable for L1VH under load
-   (most likely — same guest config, only the physical host differs), or
-2. a **VM-density threshold**: `bl5zw` had the bulk of the test VMs scheduled onto
-   it; `l7njd` only ran 9. `bl5zw` may have crossed a per-host MSHV limit `l7njd`
-   never reached.
-
-Both point at a platform/host-side limitation under MSHV load, not a repo/kernel
-software bug (the kernel would have panicked; it didn't).
+So this is **not** "any MSHV VM / the TX-queue mismatch resets the node" — but the
+inference drawn here at the time (that `bl5zw`'s host was uniquely faulty) was
+**wrong**: `l7njd` reset the same way once it carried the sustained load. The real
+differentiator is **time-to-reset under load**, not whether the reset happens.
+Both nodes exhibit a **platform/host-side L1VH-under-load reset**, not a
+repo/kernel software bug (the kernel would have panicked; it didn't).
 
 ### Prometheus telemetry (corroboration)
 
@@ -389,27 +448,34 @@ documented behavior and there is no supported tenant-side path around it.
 
 ## Next steps
 
-- Report to bonzini / Red Hat MSHV + kernel team: the Azure Hyper-V host reset the
-  L1VH partition `bl5zw` under MSHV guest load, with no in-guest panic, while an
-  identical node `l7njd` (same kernel/SKU) stayed stable. Provide the crash cadence,
-  the "no panic / no watchdog / no MCE" ruling, the host build (`10.0.26102.3641`),
-  the L1VH kernel NVR, and the bl5zw-vs-l7njd contrast.
-- **Cheapest test of the bad-host hypothesis**: delete the `bl5zw` Machine so the
-  MachineSet reprovisions it (Azure typically re-places on a different physical
-  host). If the replacement is stable under the same VM load, it confirms a
-  host-specific fault; if it also resets, it points to a density/kernel issue.
+- Report to bonzini / Red Hat MSHV + kernel team: the Azure Hyper-V host
+  hard-resets the L1VH partition under sustained MSHV guest churn, with no in-guest
+  panic, on **both** MSHV nodes tested (`bl5zw` within minutes; `l7njd` after
+  ~87 min of compute-suite churn, then repeatedly). Provide the crash cadence for
+  both, the "no panic / no watchdog / no MCE" ruling, the host build
+  (`10.0.26102.3641`), the L1VH kernel NVR, and the fact that **both nodes are
+  stable when idle and reset only under load** (`bl5zw` stayed up 15h39m once
+  tainted/idle).
+- **Superseded bad-host test:** an earlier plan here was to delete the `bl5zw`
+  Machine to test whether a fresh host is stable. That test is no longer
+  meaningful as stated — `l7njd` (a different host) also resets under load, so the
+  problem is not `bl5zw`-specific. A more useful experiment is to **characterize
+  the load threshold / time-to-reset** as a function of VM churn rate and
+  concurrency on a given host.
 - **Open a Red Hat/Microsoft support case** for host-side (Hyper-V) reset logs /
-  dumps and the physical host ID for `bl5zw`. Per the ARO Responsibility Matrix and
-  KB 7024799 (see § D), the managed-RG deny assignment is by-design and the support
-  case is the *only* sanctioned path to host-side evidence — ARO denies tenant
-  access to VM run-command and boot diagnostics, and modifying managed-RG resources
-  is explicitly unsupported.
+  dumps and the physical host IDs for **both** `bl5zw` and `l7njd`. Per the ARO
+  Responsibility Matrix and KB 7024799 (see § D), the managed-RG deny assignment is
+  by-design and the support case is the *only* sanctioned path to host-side
+  evidence — ARO denies tenant access to VM run-command and boot diagnostics, and
+  modifying managed-RG resources is explicitly unsupported.
 - Investigate whether the accelerated-NIC TX-queue mismatch (192 CPU vs 32 queues)
-  is a contributing trigger; note `l7njd` logged 12017 of the same warnings without
-  resetting, so it is at most a co-factor, not the sole cause.
+  is a contributing trigger; both nodes log thousands of the same warnings, and it
+  is the last kernel line before every reset — worth flagging even if it is only a
+  co-factor.
 - Reproduce with resource load ruled out: since CPU/memory/network were all low,
   the driver is the MSHV L2 partition create/destroy path — a churn-focused repro
-  (rapidly start/stop many small VMs on one node) is the tightest reproducer.
-- The checkup cannot produce a clean full-suite result until the node stops
+  (rapidly start/stop many small VMs on one node) is the tightest reproducer, and
+  should be run long enough (>90 min) to catch the slower-to-reset hosts.
+- The checkup cannot produce a clean full-suite result until the nodes stop
   resetting; the single-VM boot test remains the stable signal for the kernel +
   CPU-model work.
