@@ -226,7 +226,7 @@ curl -sk -o /tmp/virtctl.tar.gz \
 tar xzf /tmp/virtctl.tar.gz -C /tmp && chmod +x /tmp/virtctl
 ```
 
-### A) Run the compute suite pinned to the stable node
+### A) Run the compute suite pinned to a single MSHV node
 
 ```sh
 oc adm taint nodes <reset-prone-mshv-node> hypervisor-reset-suspect=true:NoSchedule --overwrite
