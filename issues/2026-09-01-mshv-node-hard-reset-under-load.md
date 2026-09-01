@@ -310,6 +310,16 @@ Consequences, each verified:
   az vm boot-diagnostics get-boot-log -g aro-wa2fvt52 -n <vm>
   #   -> "ERROR: Please enable boot diagnostics."  (reads instanceView.serialConsoleLogBlobUri, which is empty)
   ```
+- **Cannot "enable" boot diagnostics to work around it either** — that is a
+  `Microsoft.Compute/virtualMachines/write`, and the full VM PUT re-validates a
+  linked NIC action that the deny blocks (boot diagnostics is in fact already
+  `enabled: true`; the "Please enable" above is just the empty managed URI):
+  ```sh
+  az vm boot-diagnostics enable -g aro-wa2fvt52 -n <vm>                      # managed re-enable
+  az vm boot-diagnostics enable -g aro-wa2fvt52 -n <vm> --storage <account>  # point at our storage
+  #   both -> LinkedAuthorizationFailed: has Microsoft.Compute/virtualMachines/write, but
+  #           Microsoft.Network/networkInterfaces/join/action on the NIC "is blocked by deny assignments"
+  ```
 - The **read** paths don't expose it: the VM instance view `bootDiagnostics` is
   empty (the SAS URIs only come from the denied retrieve action):
   ```sh
