@@ -273,17 +273,72 @@ widen the outer range or use the `/api/v1/query_range` endpoint with explicit
 `start`/`end` epochs to target the historical reset window, e.g.
 `--data-urlencode start=$(date -d '2026-08-31T23:10Z' +%s)`.)
 
-### C) Azure host-side (blocked here)
+### C) Why host-side evidence is unreachable (even with root on the nodes)
 
-`az vm run-command` and `az vm boot-diagnostics get-boot-log[-uris]` against the
-node VMs both fail with `DenyAssignmentAuthorizationFailed` — ARO applies a deny
-assignment on the managed resource group. Host-side Hyper-V reset logs / dumps and
-the physical host ID require Red Hat SRE / Azure engagement:
+Root **inside** the node only sees the *guest* kernel, which is fully mined above
+and shows no in-guest fault — the reset comes from one level below, the Azure
+Hyper-V **host/parent partition**, which is a hard virtualization isolation
+boundary the guest cannot cross. Host logs/dumps live only in Azure's control
+plane, and ARO's **deny assignment** on the managed resource group blocks the
+tenant from reaching them. Inspect the deny assignment:
 
 ```sh
-MRG=$(az aro show -g <rg> -n <cluster> --query clusterProfile.resourceGroupId -o tsv | sed 's#.*/##')
-az vm boot-diagnostics get-boot-log-uris -g "$MRG" -n $NODE   # -> DenyAssignmentAuthorizationFailed
+SUB=<subscription-id>
+az rest --method get --url \
+ "https://management.azure.com/subscriptions/${SUB}/resourceGroups/aro-wa2fvt52/providers/Microsoft.Authorization/denyAssignments?api-version=2022-04-01" \
+ | jq '.value[0].properties | {actions:.permissions[].actions, dataActions:.permissions[].dataActions, excludes:[.excludePrincipals[].id]}'
+# -> actions:    ["*/action","*/delete","*/write"]
+#    dataActions: []          <-- data-plane is NOT denied; only management actions/writes/deletes are
+#    excludes:    <ARO RP first-party SPs only>   (tenant users are NOT excluded)
 ```
+
+Consequences, each verified:
+
+- **Managed boot diagnostics** (the ARO path) is retrieved with
+  `Microsoft.Compute/virtualMachines/retrieveBootDiagnosticsData/action` — an
+  `*/action`, so **denied** even for a Subscription Owner (the deny overrides RBAC).
+  Note the two CLI commands behave differently — only the one that hits the action
+  is deny-blocked:
+  ```sh
+  # the MANAGED endpoint -> denied:
+  az vm boot-diagnostics get-boot-log-uris -g aro-wa2fvt52 -n <vm>
+  #   -> DenyAssignmentAuthorizationFailed (retrieveBootDiagnosticsData/action)
+  az rest --method post --url ".../virtualMachines/<vm>/retrieveBootDiagnosticsData?api-version=2023-09-01"
+  #   -> DenyAssignmentAuthorizationFailed: "...has permission... however access is denied because of the deny assignment"
+
+  # the COMMON get-boot-log -> NOT deny-blocked, but has no source for managed diags:
+  az vm boot-diagnostics get-boot-log -g aro-wa2fvt52 -n <vm>
+  #   -> "ERROR: Please enable boot diagnostics."  (reads instanceView.serialConsoleLogBlobUri, which is empty)
+  ```
+- The **read** paths don't expose it: the VM instance view `bootDiagnostics` is
+  empty (the SAS URIs only come from the denied retrieve action):
+  ```sh
+  az vm get-instance-view -g aro-wa2fvt52 -n <vm> --query instanceView.bootDiagnostics   # {}
+  ```
+- **Data-plane isn't denied**, but doesn't help here: the managed serial log lives
+  in a **Microsoft-owned** storage account (VM `diagnosticsProfile.bootDiagnostics`
+  is `{enabled:true}` with **no** `storageUri`), not the cluster account; the
+  cluster account (`clusterb5mtjrmc65`) is network-locked (`defaultAction: Deny`)
+  and `listKeys` is a denied `*/action`; and ARO worker nodes have **no managed
+  identity** to authenticate a data-plane call from in-VNet:
+  ```sh
+  # on the node: no identity -> no token
+  oc debug node/<node> -- chroot /host curl -s -H Metadata:true \
+    "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://storage.azure.com/"
+  ```
+- **IMDS Scheduled Events** (host maintenance/reboot notices, reachable from
+  guest root) were **empty** — Azure did not record a planned host event for the
+  resets:
+  ```sh
+  oc debug node/<node> -- chroot /host curl -s -H Metadata:true \
+    "http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01"   # {"DocumentIncarnation":..,"Events":[]}
+  ```
+- `az aro` exposes no console/boot/serial command (only `get-admin-kubeconfig`).
+
+**Net:** host-side reset logs/dumps require the ARO RP first-party principal
+(the only identity excluded from the deny) — i.e. a Red Hat SRE / Microsoft
+escalation. Nothing reachable from tenant RBAC or guest root contains the
+host's reason for the reset.
 
 ## Next steps
 
