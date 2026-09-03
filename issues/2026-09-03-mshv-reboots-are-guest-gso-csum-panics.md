@@ -14,6 +14,12 @@
 > `issues/2026-09-01b-mshv-vm-crash-under-checkup-load.md`. The reset is a guest
 > kernel crash in the networking stack; the underlying node-reset issue remains
 > **open** (root cause not yet fixed, not yet reported upstream).
+>
+> **Live repro (2026-09-03):** sustained cross-node (Geneve) TCP load reset the
+> **sending** MSHV node within minutes while the receiver stayed up — matching the
+> TX/segmentation crash path. Leading upstream candidate:
+> **CVE-2026-74705**, a use-after-free in `__skb_udp_tunnel_segment` (the exact
+> faulting frame).
 
 ## Affected nodes / environment
 
@@ -158,30 +164,96 @@ it is **not** specific to any one workload.
 - `prometheus-k8s-0` running on `l7njd` was itself taken down by the resets, so
   `changes(node_boot_time_seconds)` under-counted (already noted in the 09-01 docs).
 
-## Root-cause direction (hypothesis — not yet proven)
+## Root-cause direction (hypothesis — now supported by a live repro)
 
 A kernel networking defect in **GSO segmentation + software checksum of
 Geneve/UDP-tunnel-encapsulated TCP** on this RHCOS `el10_2` 6.12 L1VH kernel: an
-skb with a bad length/fragment is handed to `csum_partial`, which then reads a
-non-canonical address. The Azure **MANA** accelerated-NIC offload/GRO behavior is
-a strong candidate trigger (recall the earlier `enP…s1 selects TX queue 172, real
-number is 32` MANA warnings). Whether the corruption originates in MANA GRO, in
-the tunnel-GSO resegmentation, or in their interaction is the open question.
+skb with a bad length/fragment (or a stale header pointer) is handed to
+`csum_partial`, which then reads a non-canonical address. The corruption arises on
+the **software** GSO path because the physical uplink cannot offload tunnel
+segmentation (see NIC offload state below), so every overlay egress is
+software-segmented in the guest.
+
+## Live reproduction (2026-09-03)
+
+Driven with `scripts/15-mshv-offload-isolation-test.sh` (sustained cross-node,
+i.e. Geneve-encapsulated, bulk TCP between two pods pinned to the two MSHV nodes):
+
+- **Baseline load reproduced the reset within minutes.** With a `sink` pod on
+  `bl5zw` and a `flood` pod (64 parallel `socat` `/dev/zero` streams) on `l7njd`,
+  **`l7njd` hard-reset at 16:58:37** (was up ~5.8 h; came back at 16:59:10). The
+  `flood` container died `exitCode 137` when its node rebooted.
+- **The SENDER crashed, not the receiver.** `l7njd` (doing GSO segmentation on
+  egress into Geneve) reset; `bl5zw` (only receiving/discarding) stayed up 2d16h.
+  This matches the panic being on the **TX/segmentation** path (`skb_segment` →
+  `csum_partial`), not RX.
+- A second load round reset `l7njd` again at 17:11:38. When the load namespace was
+  deleted, `l7njd` came back up and **stayed stable with no load** — i.e. the reset
+  is load-driven, not spontaneous.
+
+**Mitigation test — INCONCLUSIVE (tooling limitation, not a result).** Disabling
+`gso/gro/tso/tx-gso-list/tx-udp-segmentation` via `ethtool -K` on the OVS/Geneve
+devices does **not** hold: the settings are non-persistent, OVS/NetworkManager can
+revert them, and any node reboot clears them (so after the first crash they are
+back `on`). `l7njd` reset again during the "mitigated" round, but the offloads
+could not be proven still-off at crash time. A conclusive mitigation test needs a
+**durable** offload-disable (NM dispatcher script, systemd unit, or MachineConfig),
+or the real checkup (`scripts/08`) as the driver — tracked in Next steps.
+
+## NIC / overlay offload state (from `scripts/14-mshv-nic-offload-capture.sh`)
+
+| Interface | role | `tx-udp_tnl-segmentation` | `tx-gso-list` (fraglist GSO) | `gro` |
+|-----------|------|---------------------------|------------------------------|-------|
+| `eth0` (hv_netvsc) | uplink (synthetic) | `off [fixed]` | `off [fixed]` | on |
+| `enP30832s1` (MANA VF) | uplink (accel VF) | `off [fixed]` | `off [fixed]` | on |
+| `br-ex` | OVS uplink bridge | **on** | **on** | on |
+| `genev_sys_6081` | Geneve tunnel netdev | `off [fixed]` | **on** | on |
+| `ovn-k8s-mp0` | OVN mgmt port | on | **on** | on |
+
+Key points: the physical uplink **cannot** offload tunnel segmentation
+(`tx-udp_tnl-segmentation: off [fixed]`), so tunneled TCP is segmented **in
+software** on egress — exactly the crash path. The OVS/OVN software devices also
+advertise **`tx-gso-list` (NETIF_F_GSO_FRAGLIST)** and
+`tx-scatter-gather-fraglist`, i.e. the newer frag-list GSO path. The MANA VF still
+floods `enP30832s1 selects TX queue N, but real number of TX queues is 32`.
+
+## Upstream candidates (feed the eventual bug report)
+
+1. **CVE-2026-74705** (CVSS 10.0) — **use-after-free in `__skb_udp_tunnel_segment`**,
+   the exact function in our stack. The kernel captures a UDP header pointer before
+   ensuring the tunnel header is in the skb head; a realloc during the pull
+   invalidates the pointer → stale/garbage pointer → matches our non-canonical GPF.
+   Fixed in stable **5.10.265, 5.15.216, 6.1.183, 6.6.152** (and mainline / 6.12.x
+   stable). **Action:** verify whether the fix is backported into
+   `kernel-6.12.0-211.49.1.1794_2798046552.el10_2` (built 2026-08-27); the crash
+   strongly suggests it is **not** present, or ours is a closely related variant.
+2. **syzbot "general protection fault in skb_segment (5)"**
+   (`syzkaller+ebdb22d461c904fc3cb2`) — fixed 2026-07-15 by
+   `2bf43d0e2e6a "tcp: ipv6: clamp default adverting MSS to avoid GSO_BY_FRAGS
+   (0xFFFF)"`. Secondary candidate: a `GSO_BY_FRAGS`/frag-list segmentation GPF in
+   `skb_segment`. Relevant because `tx-gso-list` is enabled on the OVS/Geneve
+   devices; ours is IPv4 rather than IPv6, so this may be a sibling of the same
+   class of bug.
 
 ## Next steps
 
-- [ ] `scripts/14-mshv-nic-offload-capture.sh` — capture live NIC offload flags
-      (`ethtool -k` on the MANA uplink + OVS bridge), `ip -d link`, OVN Geneve
-      config, `ethtool -S`, kernel version, on both MSHV nodes. **(3b)**
-- [ ] `scripts/15-mshv-offload-isolation-test.sh` — **diagnostic intervention,
-      not a fix:** disable TX/GSO/GRO and tunnel-segmentation offload on the
-      uplink of one MSHV node, drive checkup load, and observe whether the panics
-      stop. Explicitly reverted afterward; the underlying kernel bug stays open. **(3c)**
-- [ ] Upstream-bug search (kernel.org / RHEL / lore.kernel.org) for
-      `csum_partial` GPF in `skb_segment` / `skb_udp_tunnel_segment` GSO on
-      6.12/el10; feed results into a CNV/RHCOS kernel bug report. **(3d)**
-- [ ] Report upstream once the offload-isolation result and upstream-bug search
-      give concrete, reproducible data.
+- [x] `scripts/14-mshv-nic-offload-capture.sh` — captured live NIC offload flags
+      (see table above); confirms software tunnel-segmentation + `tx-gso-list`. **(3b)**
+- [x] `scripts/15-mshv-offload-isolation-test.sh` — **baseline reproduced** the
+      reset under overlay load (sender crashes). Mitigation half inconclusive
+      pending a durable offload-disable. **(3c)**
+- [x] Upstream-bug search — CVE-2026-74705 (`__skb_udp_tunnel_segment` UAF) and
+      syzbot skb_segment/GSO_BY_FRAGS fix identified. **(3d)**
+- [ ] **Verify** whether `kernel-6.12.0-211.49.1.1794_2798046552.el10_2` includes
+      the CVE-2026-74705 `__skb_udp_tunnel_segment` fix (RHEL/CentOS kernel
+      changelog / `rpm -q --changelog`).
+- [ ] Durable mitigation test: disable `gso/gro/tx-gso-list` on the OVN uplink via
+      an NM dispatcher script / systemd unit / MachineConfig (survives reboot and
+      OVS reconfigure), then re-drive load to confirm the offload path is the
+      trigger.
+- [ ] Report to CNV/RHCOS kernel with: the panic signature, the live sender-only
+      repro, and the CVE-2026-74705 correlation. **(owner: to report once the
+      kernel-version verification above is done)**
 
 ## Provenance
 
