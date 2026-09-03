@@ -1,5 +1,13 @@
 # 2026-09-01 — Compute suite on `l7njd`: VM crashes were the node hard-resetting (+ a separate console-stall)
 
+> **UPDATE 2026-09-03 — the node "hard-reset" is a guest kernel panic.** The
+> `l7njd` resets that killed the VMs in this note are the same guest GSO/checksum
+> kernel panic documented in
+> `issues/2026-09-03-mshv-reboots-are-guest-gso-csum-panics.md` (GPF at
+> `csum_partial+0xe5/0x110` on the Geneve/OVS TX path → panic → reboot). The
+> "downstream of the node resetting" conclusion below is correct; the reset
+> mechanism is now identified as a guest crash, not a host-side hard reset.
+>
 > **⚠️ CORRECTION (added after the run finished).** This note was first written
 > mid-run under the belief that `l7njd` was a *stable* node and the VM crashes were
 > independent guest/qemu instability. **That was wrong.** After the run, `l7njd`'s

@@ -1,6 +1,18 @@
 # 2026-09-01 — MSHV/L1VH nodes hard-reset under KubeVirt conformance load (no in-guest panic)
 
-> **TL;DR (corrected):** MSHV/L1VH worker nodes hard-reset under sustained
+> **SUPERSEDED 2026-09-03 — the "no in-guest panic / host hard-reset" premise was
+> wrong.** Azure serial-console logs show every reset is actually a **guest kernel
+> panic**: a general-protection fault at `csum_partial+0xe5/0x110` while
+> software-checksumming a GSO segment of a Geneve(UDP-tunnel) packet on the OVS TX
+> path (`Kernel panic - not syncing: Fatal exception in interrupt` → reboot). It
+> looked like a silent host reset only because the panic is in interrupt context
+> and never flushed to journald — it printed to the serial console only. See
+> `issues/2026-09-03-mshv-reboots-are-guest-gso-csum-panics.md`. The load/Geneve
+> correlation and both-nodes-reset findings below remain valid; the mechanism is
+> a guest crash, **not** a faulty Azure Hyper-V host. The underlying reboot issue
+> stays open.
+>
+> **TL;DR (as originally corrected):** MSHV/L1VH worker nodes hard-reset under sustained
 > OpenShift Virtualization load. Originally thought to be one bad host (`bl5zw`),
 > but the second node (`l7njd`) **also** resets once it carries the load — see the
 > CORRECTION block below. This is a general L1VH-under-load reset, no in-guest panic.
