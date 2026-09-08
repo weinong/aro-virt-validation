@@ -253,6 +253,38 @@ EXPECTED_KERNEL=6.12.0-55.el10 make verify-kernel-layer
 make revert-kernel-layer                       # roll back to the base image
 ```
 
+## Disable Kernel ASLR (mshv pool)
+
+For diagnostic work only, disable KASLR on the existing `mshv` pool:
+
+```sh
+AZURE_CONFIG_DIR="$HOME/.azure-virt-test" \
+KUBECONFIG="$PWD/kubeconfig" \
+  make mshv-nokaslr
+```
+
+Select credentials for the intended cluster explicitly; this target uses the
+current kubeconfig and does not log in or switch contexts. It sources `.env`
+through `scripts/env.sh` when present.
+
+The target requires a populated, unpaused, fully updated pool, then idempotently
+applies `99-mshv-nokaslr` with `kernelArguments: [nokaslr]`. It leaves other
+MachineConfigs, kernel arguments, and OS image settings intact. Only the `mshv`
+role is targeted, not ordinary workers or control-plane nodes. The MCO drains
+and reboots affected nodes. The script waits for the new rendered configuration
+and verifies `/proc/cmdline` on every MSHV node using `oc debug`.
+`MCP_UPDATE_TIMEOUT_SECONDS` defaults to 1800 and `MCP_UPDATE_POLL_SECONDS` to 15.
+If rollout fails, the MachineConfig remains applied for investigation.
+
+This reduces kernel exploit protection; it does not disable userspace or guest
+ASLR. It is an explicit diagnostic intervention, not a fix for validation
+failures, and is not part of the default validation flow. To remove the override
+(another drain/reboot rollout):
+
+```sh
+KUBECONFIG="$PWD/kubeconfig" oc delete mc 99-mshv-nokaslr --ignore-not-found
+```
+
 ## Cleanup
 
 ```sh

@@ -454,6 +454,10 @@ techpreview: ## Enable and verify TechPreviewNoUpgrade
 techpreview-crd-ordering-fix: ## Detect/pre-apply payload CRDs mis-ordered after their CR (OCPBUGS-99266 workaround)
 	@./scripts/03a-payload-crd-ordering-fix.sh
 
+.PHONY: mshv-nokaslr
+mshv-nokaslr: ## Disable kernel ASLR on the mshv pool (drains/reboots nodes)
+	@bash ./scripts/04a-mshv-nokaslr.sh
+
 mshv-node: ## Create and verify the declarative MSHV node
 	@./scripts/04-mshv-node-setup.sh
 
