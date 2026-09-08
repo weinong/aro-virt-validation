@@ -11,10 +11,14 @@
 > comparable across boots and across nodes**. A decode table for the documented
 > panic frames is included below.
 >
-> Serial-console logs for the new panic windows are **still required** to confirm
-> the faulting instruction and fault addresses; nothing here re-confirms the
-> `csum_partial` signature on its own. The underlying kernel defect remains
-> **open and unfixed**.
+> Serial-console logs for the four panic windows were retrieved and analysed:
+> the `csum_partial+0xe5` signature is **unchanged**, but the analysis **corrects
+> the 09-03 root-cause framing**. The fault addresses are *not* non-canonical
+> garbage — with `nokaslr` they decode to ordinary direct-map pointers into real
+> RAM, and **217/217 faults are 8-byte reads straddling a 4 KiB page boundary**
+> from `csum_partial`'s deliberate tail over-read. Why that read raises **#GP**
+> rather than succeeding is now the central open question. The underlying defect
+> remains **open and unfixed**.
 
 ## Environment
 
@@ -136,6 +140,165 @@ Earlier resets the same evening, before this controlled run: 21:06:44, 21:32:47,
 21:35:50, 21:40:31, 21:43:26. Several of those occurred with **no synthetic
 load** running, so the crash is not exclusive to the reproducer's traffic.
 
+## Serial-console analysis (received 2026-09-08)
+
+Serial log for `l7njd` covering **216 boots / 217 GPF oopses / 210 panics**,
+analysed with `scripts/13-serial-log-panic-analysis.sh`. **10 oopses are from
+`nokaslr` boots**, 207 predate it.
+
+### The signature is unchanged
+
+Every single panic RIP in the whole file is the same:
+
+```
+$ grep -o 'RIP: 0010:[a-z_]*+0x[0-9a-f]*/0x[0-9a-f]*' … | sort | uniq -c
+    426 csum_partial+0xe5/0x110
+    155 default_idle+0xf/0x20      <- idle CPUs in the multi-CPU dump, not the fault
+```
+
+The call chain is identical to 09-03, including on `nokaslr` boots:
+`csum_partial` ← `__skb_checksum` ← `skb_segment` ← `tcp_gso_segment` ←
+`inet_gso_segment` ← `skb_mac_gso_segment` ← `__skb_udp_tunnel_segment` ←
+`skb_udp_tunnel_segment` ← … ← `geneve_xmit_skb [geneve]`. So `nokaslr` changed
+nothing about the failure; it is purely diagnostic, as intended.
+
+### CORRECTION: the fault addresses are **not** non-canonical, and not garbage
+
+The 09-03 issue states the fault address is *"a **non-canonical** pointer …
+(top bits not sign-extended → GPF)"*. **That is wrong**, and `nokaslr` is what
+exposed it.
+
+From the register dump of the last panic:
+
+```
+CR4: 0000000000b71ef0      -> bit 12 (LA57) is SET  => 5-level paging
+RSP: ffa00000192e6a68      -> 5-level VMALLOC_START (0xffa0000000000000)
+GS:  ff1100303fa00000      -> 5-level PAGE_OFFSET   (0xff11000000000000)
+RAX: ff110091feab7ffc      -> the faulting address
+```
+
+With 5-level paging a linear address is canonical when bits 63:57 equal bit 56.
+For `0xff11…` they do, so **the address is canonical**. It only looked
+non-canonical if you assume 4-level paging, which this kernel is not using.
+
+What `nokaslr` proves is stronger. KASLR randomizes `page_offset_base`, so before
+`nokaslr` the fault addresses had **57 distinct high-16 prefixes** and looked like
+random garbage. With `nokaslr` all 10 fault addresses share the single prefix
+`0xff11` — exactly the default 5-level `PAGE_OFFSET`:
+
+```
+0xff110002b7907ffb  ->  phys 0x0002b7907ffb
+0xff110064c24b7ffc  ->  phys 0x0064c24b7ffc
+0xff110031f2617ffa  ->  phys 0x0031f2617ffa
+0xff110091feab7ffc  ->  phys 0x0091feab7ffc
+…
+```
+
+**The fault addresses are ordinary direct-map (physmap) pointers**, i.e.
+`PAGE_OFFSET + physical_address`. Every decoded physical address lands inside a
+`usable` e820 RAM region, hundreds of GB away from any region boundary, and the
+**next** page is also usable RAM:
+
+```
+FAULT PHYS       NEXT PAGE        NEXT PAGE USABLE RAM?
+0x0091feab7ffc   0x0091feab8000   YES - mapped RAM
+0x009400dffffc   0x009400e00000   YES - mapped RAM        (all 10 identical)
+```
+
+So the crash is **not** a wild pointer, **not** non-canonical, and **not** an
+access past the end of physical memory.
+
+### 217 of 217 faults straddle a 4 KiB page boundary
+
+Distribution of the faulting address within its page, across the entire file:
+
+```
+  0xff9 n=14   0xffa n=29   0xffb n=29   0xffc n=98
+  0xffd n=24   0xffe n=15   0xfff n=8
+  -> 217/217 = 100% within 7 bytes of the page end
+```
+
+**Every fault is an 8-byte read that crosses into the following page.** No fault
+ever occurs anywhere else in a page.
+
+### The faulting instruction is `csum_partial`'s deliberate tail over-read
+
+Disassembling the `Code:` bytes around the `<48>` fault marker:
+
+```
+add    (%rax),%rdx        ; 8-byte accumulate loop
+adc    $0x0,%rdx
+add    $0x8,%rax
+test   $0x7,%sil          ; loop while length is a multiple of 8
+je     <loop>
+neg    %esi               ; --- tail path ---
+shl    $0x3,%esi
+and    $0x3f,%esi
+mov    (%rax),%rax        ; <== FAULT: reads a full 8 bytes, then masks off
+```
+
+This is the standard tail optimisation: read 8 bytes and shift away the bytes
+beyond the buffer. It **intentionally over-reads by up to 7 bytes**.
+
+Working the register values backwards: `%esi` ends as `0x20`, which requires the
+remaining length ≡ 4 (mod 8); `RDI = …7c8c` (the buffer) and `RAX = …7ffc`, so
+the buffer ends at `…8000` — **exactly on the page boundary**. The tail then
+reads 4 bytes beyond the buffer, into the next page.
+
+### What this means, and the open question
+
+The mechanism is now precise and measured:
+
+1. A Geneve-encapsulated TCP skb is software-segmented (the uplink cannot offload
+   tunnel segmentation), so the guest checksums the payload itself.
+2. The buffer being checksummed ends exactly on a 4 KiB page boundary — routine
+   for page-backed skb frags.
+3. `csum_partial`'s tail reads 8 bytes and masks, touching the next page.
+4. That read faults with **#GP**.
+
+**Step 4 is unexplained and is now the central question.** The address is
+canonical, it is a direct-map pointer, and the target page is `usable` RAM well
+inside a memory region. Architecturally that read should simply succeed; if the
+page were merely absent it should raise **#PF**, not **#GP**. On ordinary
+hardware this same over-read is harmless, which is why upstream considers it safe.
+
+Two candidate explanations, **neither confirmed**:
+
+- **L1VH/MSHV memory donation.** These are L1VH root-partition hosts
+  (`Hyper-V: running as L1VH partition`, `mshv_root` loaded, and the log contains
+  1433 × `using unsupported MSHV_CREATE_PARTITION ioctl`). If pages donated to a
+  child partition are removed from the root partition's access, an over-read into
+  a neighbouring VM-owned page would fault. This would make the crash
+  **L1VH-specific** rather than a generic networking bug.
+- **A genuinely corrupt skb length**, per the original CVE-2026-74705 theory,
+  where the walk runs far past the buffer and eventually reaches an inaccessible
+  page. The 100 % page-straddle statistic does **not** discriminate between these
+  two: `RDI` is 4-byte aligned, so with 8-byte steps every page crossing is a
+  straddle either way.
+
+Evidence **against** simple VM-adjacency: during the controlled run the only
+running VMs (`vm-pool-fedora-0` since 21:43, `probe`) were on **7rn6g**, the node
+that never crashed, while VM-less `l7njd` crashed four times. That weakens, but
+does not eliminate, the donation hypothesis — `mshv_root` is loaded and
+partition ioctls occur on both nodes regardless of VM placement.
+
+Ruled out from the log: no `hv_balloon` activity, no memory hot-add/hot-remove,
+and no Hyper-V intercept messages.
+
+### Revised next steps
+
+- [ ] Determine why a canonical direct-map read of `usable` RAM raises **#GP**
+      instead of succeeding. This is the crux; everything above is now measured.
+- [ ] Establish whether the physical pages adjacent to the faulting buffers are
+      donated to L1VH child partitions / otherwise removed from the root
+      partition's mappings.
+- [ ] Get a `vmlinux` for this exact build to confirm `csum_partial+0xe5` is the
+      tail path and to check the `skb_segment+0x667` caller's length handling.
+- [ ] Re-test the offload mitigation with the fixed reproducer; if software
+      tunnel segmentation is avoided, the over-read never happens.
+- [ ] When reporting upstream, lead with the **page-straddling tail over-read on
+      an L1VH host**, not with "non-canonical pointer".
+
 ## Reproducer defects found and fixed
 
 The first run of the day reported `resets=0` **while the sender was actually
@@ -190,11 +353,13 @@ a red herring, and nothing here changes that.
 
 ## What is still open
 
-- [ ] Fetch the serial console for the four panic windows above and confirm the
-      RIP equals `0xffffffff81e8cc05` (`csum_partial+0xe5`) using the decode table.
-      **Owner: user is re-fetching boot diagnostics.**
-- [ ] Compare the non-canonical fault addresses across panics now that they are
-      comparable, to test whether they derive from a stable kernel address.
+- [x] Fetch the serial console for the four panic windows above and confirm the
+      RIP. **Done** — all 217 oopses fault at `csum_partial+0xe5`; see the
+      serial-console analysis section, which also **corrects** the 09-03
+      non-canonical-pointer claim.
+- [ ] Explain why a canonical direct-map read of `usable` RAM raises **#GP**.
+- [ ] Establish whether pages adjacent to the faulting buffers are donated to
+      L1VH child partitions or otherwise removed from the root partition.
 - [ ] Re-run the **mitigation** half with the fixed tooling and a durable
       offload-disable; the 09-03 mitigation result is not trustworthy.
 - [ ] Verify whether this kernel carries the CVE-2026-74705

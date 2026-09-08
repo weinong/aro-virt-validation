@@ -1,5 +1,25 @@
 # 2026-09-03 — MSHV/L1VH node reboots are a guest kernel GSO/checksum panic (`csum_partial` GPF), not a silent host reset
 
+> **⚠️ PARTIALLY SUPERSEDED — see `issues/2026-09-08b-gso-panic-reproduced-with-nokaslr.md`.**
+> The panic signature and the sender-side reproduction below still hold. Two
+> claims in this document are **wrong** and were corrected on 2026-09-08 after
+> `nokaslr` made the addresses decodable:
+>
+> 1. **"non-canonical … top bits not sign-extended → GPF" is incorrect.** The
+>    kernel runs with 5-level paging (`CR4.LA57` set), under which the fault
+>    addresses **are canonical**. They are ordinary direct-map pointers
+>    (`PAGE_OFFSET + phys`) into `usable` RAM; they only looked random because
+>    KASLR was randomising `page_offset_base`.
+> 2. **"walked off the end of a corrupted skb buffer" is not established.**
+>    100 % of faults (217/217) are 8-byte reads straddling a 4 KiB page
+>    boundary, produced by `csum_partial`'s *deliberate* tail over-read. The skb
+>    length may well be correct.
+>
+> The `resets` numbers in the "Live reproduction" and "Mitigation test" sections
+> are also unreliable: the reproducer's reset detection was broken (it compared
+> journal boot **counts**, which journal rotation pins) and its load stopped at
+> the first crash. Both are fixed as of 2026-09-08.
+
 > **TL;DR:** The repeated MSHV/L1VH worker reboots under OpenShift Virtualization
 > load are a **reproducible guest kernel panic**, not an invisible Azure
 > Hyper-V host hard-reset. Azure boot-diagnostics **serial-console** logs (which
