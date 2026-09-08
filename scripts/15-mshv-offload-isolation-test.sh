@@ -33,6 +33,7 @@
 #   ./scripts/15-mshv-offload-isolation-test.sh clean           # remove test ns
 #
 # Tunables (env): DURATION (s, default 900), STREAMS (default 48),
+#   POLL (reset-poll seconds, default 15),
 #   NS (default ovn-mshv-isolation), IMAGE (default origin-tools).
 # =============================================================================
 set -euo pipefail
@@ -45,6 +46,7 @@ check_command oc || exit 1
 NS="${NS:-ovn-mshv-isolation}"
 IMAGE="${IMAGE:-quay.io/openshift/origin-tools:latest}"
 DURATION="${DURATION:-900}"
+POLL="${POLL:-15}"
 STREAMS="${STREAMS:-48}"
 PORT="${PORT:-5001}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-60}"
@@ -60,11 +62,31 @@ mshv_nodes() {
     --request-timeout="${REQUEST_TIMEOUT}s"
 }
 
-node_boot_count() {
+# Kubelet-reported boot ID; it changes on every boot.
+#
+# This replaces a `journalctl --list-boots | wc -l` boot COUNT. That count is
+# capped by journal rotation: on a node that has already crashed many times the
+# oldest boot is vacuumed as each new one is appended, so the count stays pinned
+# (observed stuck at 70) and real resets were reported as `resets=0`. Reading the
+# boot ID from the API also avoids one `oc debug` pod per node per poll.
+node_boot_id() {
   local node="$1"
-  timeout "${DEBUG_TIMEOUT}" oc debug "node/${node}" --request-timeout="${REQUEST_TIMEOUT}s" \
-    -- chroot /host bash -c 'journalctl --list-boots --no-pager 2>/dev/null | wc -l' 2>/dev/null \
-    | grep -aoE '^[0-9]+' | head -1
+  oc get "node/${node}" -o jsonpath='{.status.nodeInfo.bootID}' \
+    --request-timeout="${REQUEST_TIMEOUT}s" 2>/dev/null
+}
+
+# Records any boot-ID change since the last poll. Updates the caller's boot_id
+# and resets maps (bash dynamic scoping).
+check_for_resets() {
+  local elapsed="$1"; shift
+  local n now
+  for n in "$@"; do
+    now="$(node_boot_id "$n")"
+    [[ -n "${now}" && "${now}" != "${boot_id[$n]}" ]] || continue
+    resets[$n]=$(( resets[$n] + 1 ))
+    log_warn "RESET DETECTED on ${n}: boot ${boot_id[$n]} -> ${now} at t=${elapsed}s (MITIGATE=${MITIGATE})"
+    boot_id[$n]="${now}"
+  done
 }
 
 node_offload_state() {
@@ -95,23 +117,31 @@ apply_offload() {
 }
 
 cmd_status() {
-  log_info "MSHV nodes: boot counts + offload state"
+  log_info "MSHV nodes: boot IDs + offload state"
   local n
   for n in $(mshv_nodes); do
     log_info "---- ${n} ----"
-    echo "  kernel boot count: $(node_boot_count "${n}")"
+    echo "  current boot ID: $(node_boot_id "${n}")"
     node_offload_state "${n}" | sed 's/^/  /'
   done
 }
 
 cmd_mitigate() { local n; for n in $(mshv_nodes); do apply_offload "${n}" off; done; log_ok "Offloads disabled (non-persistent)."; }
 cmd_revert()   { local n; for n in $(mshv_nodes); do apply_offload "${n}" on;  done; log_ok "Offloads restored to on (defaults)."; }
-cmd_clean()    { oc delete ns "${NS}" --wait=false >/dev/null 2>&1 || true; log_ok "Removed namespace ${NS}."; }
+cmd_clean() {
+  oc delete ns "${NS}" --ignore-not-found --timeout=180s >/dev/null 2>&1 || true
+  log_ok "Removed namespace ${NS}."
+}
 
 deploy_load_pods() {
   local server_node="$1" client_node="$2"
   oc create ns "${NS}" --dry-run=client -o yaml | oc apply -f - >/dev/null
   oc label ns "${NS}" pod-security.kubernetes.io/enforce=privileged --overwrite >/dev/null 2>&1 || true
+
+  # Pods from an earlier run are usually dead (their node crashed) and their spec
+  # is immutable, so `oc apply` cannot revive them and the readiness wait would
+  # block on a corpse. Remove them first so a rerun is idempotent.
+  oc -n "${NS}" delete pod sink flood --ignore-not-found --timeout=120s >/dev/null 2>&1 || true
 
   # Sink server: accept many parallel TCP streams and discard.
   cat <<YAML | oc apply -f - >/dev/null
@@ -123,7 +153,7 @@ metadata:
   labels: {app: mshv-iso}
 spec:
   nodeName: ${server_node}
-  restartPolicy: Never
+  restartPolicy: Always
   containers:
   - name: sink
     image: ${IMAGE}
@@ -149,7 +179,7 @@ metadata:
   labels: {app: mshv-iso}
 spec:
   nodeName: ${client_node}
-  restartPolicy: Never
+  restartPolicy: Always
   containers:
   - name: flood
     image: ${IMAGE}
@@ -160,7 +190,8 @@ spec:
       capabilities: {drop: ["ALL"]}
       seccompProfile: {type: RuntimeDefault}
 YAML
-  oc -n "${NS}" wait --for=condition=Ready pod/flood --timeout=180s >/dev/null
+  oc -n "${NS}" wait --for=condition=Ready pod/flood --timeout=180s >/dev/null || \
+    log_warn "flood pod not Ready yet (its node may have already crashed); continuing."
   log_info "flood pod on ${client_node} driving ${STREAMS} streams for ${DURATION}s"
 }
 
@@ -178,45 +209,54 @@ cmd_load() {
     log_warn "Baseline mode: offloads ON. Nodes are EXPECTED to reboot if the hypothesis holds."
   fi
 
-  declare -A before
+  declare -A boot_id resets
   local n
-  for n in "${nodes[@]}"; do before[$n]="$(node_boot_count "$n")"; log_info "before: ${n} boots=${before[$n]}"; done
+  for n in "${nodes[@]}"; do
+    boot_id[$n]="$(node_boot_id "$n")"
+    resets[$n]=0
+    if [[ -z "${boot_id[$n]}" ]]; then
+      log_error "Could not read the boot ID of ${n}; resets on it cannot be detected."
+      exit 1
+    fi
+    log_info "before: ${n} boot=${boot_id[$n]}"
+  done
 
   deploy_load_pods "${server_node}" "${client_node}"
 
-  log_info "Driving load for ${DURATION}s (polling for resets every 30s)..."
+  log_info "Driving load for ${DURATION}s (polling for resets every ${POLL}s)..."
   local start elapsed
   start="$(date +%s)"
   while :; do
     elapsed=$(( $(date +%s) - start ))
     (( elapsed >= DURATION )) && break
-    sleep 30
-    for n in "${nodes[@]}"; do
-      local now; now="$(node_boot_count "$n" || echo '?')"
-      if [[ "${now}" =~ ^[0-9]+$ && "${now}" -gt "${before[$n]}" ]]; then
-        log_warn "RESET DETECTED on ${n}: boots ${before[$n]} -> ${now} at t=${elapsed}s (MITIGATE=${MITIGATE})"
-      fi
-    done
+    sleep "${POLL}"
+    check_for_resets "${elapsed}" "${nodes[@]}"
   done
+  check_for_resets "${DURATION}" "${nodes[@]}"
 
   log_info "==== RESULT (MITIGATE=${MITIGATE}, DURATION=${DURATION}s, STREAMS=${STREAMS}) ===="
-  local resets=0
+  local total=0
   for n in "${nodes[@]}"; do
-    local after; after="$(node_boot_count "$n" || echo '?')"
-    local delta="?"
-    [[ "${after}" =~ ^[0-9]+$ ]] && delta=$(( after - before[$n] ))
-    log_info "  ${n}: boots ${before[$n]} -> ${after} (resets=${delta})"
-    [[ "${delta}" =~ ^[0-9]+$ ]] && resets=$(( resets + delta ))
+    log_info "  ${n}: resets=${resets[$n]} (current boot ${boot_id[$n]:-<unreadable>})"
+    total=$(( total + resets[$n] ))
   done
-  log_info "  total resets during test: ${resets}"
-  if [[ "${MITIGATE}" == "true" && "${resets}" -eq 0 ]]; then
+  log_info "  total resets observed during test: ${total}"
+  log_info "  NOTE: this counts observed boot-ID CHANGES; two resets between polls count once."
+  if [[ "${MITIGATE}" == "true" && "${total}" -eq 0 ]]; then
     log_ok "No resets with offloads disabled — supports the GSO/GRO-path trigger hypothesis."
-  elif [[ "${MITIGATE}" != "true" && "${resets}" -gt 0 ]]; then
+  elif [[ "${MITIGATE}" != "true" && "${total}" -gt 0 ]]; then
     log_ok "Baseline reproduced the reset under overlay load."
   else
     log_warn "Inconclusive — may need longer DURATION/STREAMS or the real checkup (scripts/08) as the driver."
   fi
-  log_info "Leaving load namespace ${NS} in place; run '$0 clean' to remove."
+  log_info "Cross-check the node's own boot list, which carries per-boot timestamps:"
+  log_info "  oc debug node/<node> -- chroot /host journalctl --list-boots"
+  # The pods restart across node crashes, so they must be stopped explicitly or
+  # they would keep hammering the overlay after the measurement window closes.
+  log_info "Stopping load pods (namespace ${NS} is kept for inspection)..."
+  oc -n "${NS}" delete pod sink flood --ignore-not-found --timeout=120s >/dev/null 2>&1 || \
+    log_warn "Could not delete the load pods; run '$0 clean' to stop the load."
+  log_ok "Load stopped. Run '$0 clean' to remove namespace ${NS}."
 }
 
 ACTION="${1:-status}"
