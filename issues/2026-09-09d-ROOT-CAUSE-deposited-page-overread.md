@@ -383,23 +383,148 @@ rather than working around its violation.
 
 ## Reproducing
 
+Every claim in this document maps to a command below. Offline steps need only
+the collected artifacts; on-node steps need `KUBECONFIG` and an MSHV node.
+
+### 0. Prerequisites (one time, reboots the node)
+
 ```sh
-make mshv-kdump                                    # capture panics locally
-bash scripts/21-mshv-deposit-trace.sh install      # boot-time deposit ledger
-# start a VM on the node, then:
-NODE=<mshv-node> DURATION=420 STREAMS=64 bash scripts/19-mshv-veth-csum-stress.sh run
+export KUBECONFIG=$PWD/kubeconfig
+export NODE=$(oc get nodes -l node-role.kubernetes.io/mshv \
+                -o jsonpath='{.items[0].metadata.name}')
+
+bash scripts/04a-mshv-nokaslr.sh              # fixed PAGE_OFFSET, needed by 17/24
+make mshv-kdump                               # capture panic logs across reboot
+bash scripts/21-mshv-deposit-trace.sh install # boot-time deposit ledger
+bash scripts/21-mshv-deposit-trace.sh ledger  # verify it is complete from boot
+```
+
+The ledger **must** be complete from boot: a ledger started after the deposits it
+is supposed to explain will silently fail to correlate. `ledger` reports this.
+
+### 1. Root cause: the over-read is a fixup-annotated load, and Linux still maps the page
+
+Fully offline, from one kdump directory plus the matching `kernel-devel` RPM:
+
+```sh
+bash scripts/26-verify-zeropad-overread.sh all \
+  .checkup-runs/crash-2026-09-09-2146 \
+  ~/kernel-rpms-mgns1/kernel-devel-6.12.0-211.49.1.1794_2798046552.mgns1.el10.x86_64.rpm
+```
+
+Proves, in order:
+
+| Sub-claim | Expected output |
+|---|---|
+| The faulting instruction is `load_unaligned_zeropad()` | `neg %esi` / `shl $0x3,%esi` / `and $0x3f,%esi` / `mov (%rax),%rax` |
+| That load is *designed* to fault | `_ASM_EXTABLE_TYPE(1b, 2b, EX_TYPE_ZEROPAD)` |
+| Linux still maps the page, so `#PF` is impossible | `PMD 0x80000031190001e3` → Present=1, PS=1 |
+
+Individually: `insn <vmcore-dmesg.txt>`, `extable <rpm>`, `ptes <vtop.txt> <addr>`.
+
+### 2. The fault lands on a page deposited to the hypervisor (4/4)
+
+```sh
+# start a VM on the node so partitions exist, then:
+NODE=$NODE DURATION=420 STREAMS=64 bash scripts/19-mshv-veth-csum-stress.sh run
 bash scripts/16-mshv-kdump.sh collect
-python3 scripts/22-correlate-fault-deposits.py <ledger>/trace.log <dump>/vmcore-dmesg.txt
+bash scripts/21-mshv-deposit-trace.sh fetch
+
+python3 scripts/22-correlate-fault-deposits.py \
+  .checkup-runs/mshv-deposit-trace/boot-<id>/trace.log \
+  .checkup-runs/crash-<stamp>/vmcore-dmesg.txt
 ```
 
-To run the negative control that isolates the software checksum, keep offload on
-— the node should survive indefinitely:
+Expect `-> IN DEPOSITED RANGE` with `withdrawn=False`. The correlator refuses to
+compare a panic against a ledger from a different boot and states whether the
+ledger was complete from boot — both mistakes were made and caught here.
+
+### 3. The payload walk, not traffic volume, is what kills
+
+Same node, same live deposited pages; only the offload flag differs. Run the
+control **first** — it should survive:
 
 ```sh
-NODE=<mshv-node> DURATION=420 STREAMS=64 DISABLE_CSUM_OFFLOAD=false \
-  bash scripts/19-mshv-veth-csum-stress.sh run
+NODE=$NODE DURATION=420 STREAMS=64 DISABLE_CSUM_OFFLOAD=false \
+  bash scripts/19-mshv-veth-csum-stress.sh run      # ~3,395 GiB, no crash
+
+NODE=$NODE DURATION=420 STREAMS=64 DISABLE_CSUM_OFFLOAD=true \
+  bash scripts/19-mshv-veth-csum-stress.sh run      # panics in seconds
+
+bash scripts/19-mshv-veth-csum-stress.sh fetch      # after the reboot
+python3 scripts/20-analyze-stress-runs.py
 ```
 
-The correlator refuses to compare a panic with a ledger from a different boot,
-and states whether the ledger was complete from boot — both mistakes were made
-and caught during this investigation.
+Verify the node really did survive the control arm rather than rebooting
+unnoticed — compare boot IDs, do not infer from the absence of a crash marker:
+
+```sh
+oc debug node/$NODE -- chroot /host journalctl --list-boots -n 5
+```
+
+### 4. Software checksums are a trickle, and they come from OVS
+
+```sh
+NODE=$NODE bash scripts/23-csum-software-rate.sh validate   # MUST be non-zero
+NODE=$NODE bash scripts/23-csum-software-rate.sh measure 20 # ~12 __skb_checksum/s
+NODE=$NODE bash scripts/23-csum-software-rate.sh stacks 25  # ovs_dp_* callers
+```
+
+Run `validate` first, always. The global ftrace buffer is drained by
+`mshv-trace-stream.service`, so enabling events there reports **zero hits** — for
+real traffic *and* for a known-good positive control. This script measures in a
+private ftrace instance to avoid that; `validate` is what proves it worked.
+
+Supporting NIC capability (why an inner checksum cannot be offloaded):
+
+```sh
+oc debug node/$NODE -- chroot /host ethtool -k eth0 | grep tx-checksum
+# tx-checksum-ip-generic: off [fixed]   <- cannot offload at an arbitrary offset
+```
+
+### 5. Deposits are single scattered pages, from constant partition churn
+
+```sh
+python3 scripts/25-analyze-deposit-ledger.py \
+  .checkup-runs/mshv-deposit-trace/boot-<id>/trace.log
+```
+
+Expect ~98% `count=1`, ~15 pages/s, and guest partitions with sub-second
+lifetimes (ephemeral CNV probe partitions).
+
+### 6. Deposit does not immediately revoke read access
+
+```sh
+NODE=$NODE bash scripts/24-deposit-page-readability.sh probe 40
+```
+
+Expect the `KNOWN-UNMAPPED` calibration row to read all-zero with `errno=0` —
+that is what proves `/proc/kcore` zero-fills on fault, making the all-zero rate an
+**upper bound** on inaccessibility rather than a measurement. The unambiguous
+result is the opposite arm: deposited pages returning real data were not revoked.
+
+### 7. L1VH is required
+
+```sh
+NODE=$NODE bash scripts/18-mshv-fault-differential.sh run
+```
+
+L1VH crashes; a non-L1VH node of the same size and kernel absorbs TiB without a
+fault.
+
+### Offline test suite
+
+No cluster required; ~2 seconds. Run before trusting any analysis output:
+
+```sh
+bash tests/zeropad-overread-tests.sh          # Code:/PMD decode, ledger parsing
+bash tests/stress-run-analysis-tests.sh       # stress-run analyser
+python3 scripts/22-correlate-fault-deposits.py --self-test
+python3 scripts/25-analyze-deposit-ledger.py  --self-test
+```
+
+Each case in `zeropad-overread-tests.sh` is a parsing bug that was actually hit
+during this investigation and would otherwise have produced a confidently wrong
+claim — an ftrace comm containing a space silently dropping a third of the
+deposit records, and `vtop.txt`'s multiple translation blocks causing the wrong
+page's PMD to be decoded.
