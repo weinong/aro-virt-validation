@@ -102,6 +102,12 @@ assert 'path /var/crash' in conf, conf
 
 # --non-mmap is what stops makedumpfile taking SIGSEGV on unreadable pages.
 assert '--non-mmap' in wrap, wrap
+# The page-table walk must run BEFORE the full dump, because the full dump
+# usually aborts on an unreadable page and would otherwise take vtop with it.
+assert wrap.index('--vtop') < wrap.index('makedumpfile.log'), wrap
+assert 'vtop.txt' in wrap, wrap
+# It must walk the address from the oops, not just a hardcoded sentinel.
+assert 'fault, maybe for address' in wrap, wrap
 # The wrapper must persist the log and preserve makedumpfile's exit code,
 # otherwise kdump renames a truncated vmcore-incomplete to vmcore.
 assert 'makedumpfile.log' in wrap, wrap

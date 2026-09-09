@@ -23,6 +23,7 @@
 #   ./scripts/16-mshv-kdump.sh enable    # apply MachineConfig, wait for rollout
 #   ./scripts/16-mshv-kdump.sh verify    # check kdump is armed on every node
 #   ./scripts/16-mshv-kdump.sh list      # list captured vmcores
+#   ./scripts/16-mshv-kdump.sh collect   # copy dump artefacts off the nodes
 #   ./scripts/16-mshv-kdump.sh disable   # remove the MachineConfig (reboots)
 #
 # Tunables (env): MSHV_MCP_NAME (default mshv),
@@ -88,15 +89,42 @@ cmd_enable() {
   # makedumpfile's output next to the dump and preserves its exit code.
   log_info "core_collector: ${CORE_COLLECTOR}"
   local wrapper kdump_conf
-  wrapper="$(cat <<WRAP
+  # Built with a quoted heredoc so only @@COLLECTOR@@ is substituted.
+  wrapper="$(cat <<'WRAP'
 #!/bin/sh
-log="\${2%/*}/makedumpfile.log"
-${CORE_COLLECTOR} "\$1" "\$2" >"\$log" 2>&1
-rc=\$?
-cat "\$log" >/dev/console 2>/dev/null
-exit \$rc
+dir="${2%/*}"
+
+# The full dump reliably aborts on an unreadable page, but the question we
+# actually need answered is far smaller than 23 GiB: was the PTE for the
+# faulting address present and valid at the moment of the fault? --vtop walks
+# the crashed kernel's page tables for one address, so it answers that without
+# dumping memory at all. Run it FIRST, so we still get the answer when the
+# full dump fails.
+{
+  echo "=== sentinel vtop (proves the mechanism works on this dump) ==="
+  rm -f "$dir/.vtop-scratch"
+  makedumpfile --non-mmap --vtop 0xff11000100000000 "$1" "$dir/.vtop-scratch" 2>&1
+  fault=$(grep -ao 'fault, maybe for address 0x[0-9a-f]*' "$dir/vmcore-dmesg.txt" 2>/dev/null | head -1 | sed 's/.*0x/0x/')
+  rip=$(grep -ao 'RIP: [0-9]*:[^ ]*' "$dir/vmcore-dmesg.txt" 2>/dev/null | head -1)
+  echo "=== oops RIP: ${rip:-<none>} ==="
+  if [ -n "$fault" ]; then
+    echo "=== vtop of faulting address ${fault} ==="
+    rm -f "$dir/.vtop-scratch"
+    makedumpfile --non-mmap --vtop "$fault" "$1" "$dir/.vtop-scratch" 2>&1
+  else
+    echo "=== no GPF fault address in vmcore-dmesg.txt (expected for sysrq tests) ==="
+  fi
+} > "$dir/vtop.txt" 2>&1
+rm -f "$dir/.vtop-scratch"
+
+@@COLLECTOR@@ "$1" "$2" >"$dir/makedumpfile.log" 2>&1
+rc=$?
+cat "$dir/makedumpfile.log" >/dev/console 2>/dev/null
+exit $rc
 WRAP
 )"
+  wrapper="${wrapper//@@COLLECTOR@@/${CORE_COLLECTOR}}"
+
   kdump_conf="$(printf '%s\n' 'auto_reset_crashkernel yes' 'path /var/crash' \
     "extra_bins ${COLLECT_WRAPPER}" "core_collector ${COLLECT_WRAPPER}")"
 
@@ -196,6 +224,36 @@ cmd_list() {
   done
 }
 
+# Crash dumps live on node-local disk, so a MachineHealthCheck replacement
+# destroys them: that is exactly how the real csum_partial panic captured on
+# 2026-09-09 03:18 was lost. Copy the small artefacts off promptly.
+cmd_collect() {
+  local out_dir="${COLLECT_DIR:-${_REPO_ROOT}/.checkup-runs/kdump-collected}"
+  mkdir -p "${out_dir}"
+  local node dir name
+  for node in $(mshv_nodes); do
+    # on_node emits oc error text on failure; without this filter that text is
+    # word-split into bogus directory names.
+    for dir in $(on_node "${node}" 'ls -1d /var/crash/*/ 2>/dev/null' \
+                   | tr -d '\r' | grep -E '^/var/crash/[^ ]+/$' || true); do
+      name="${node}$(basename "${dir}")"
+      mkdir -p "${out_dir}/${name}"
+      local f
+      for f in vmcore-dmesg.txt vtop.txt makedumpfile.log kexec-dmesg.log; do
+        [[ -s "${out_dir}/${name}/${f}" ]] && continue
+        if oc debug "node/${node}" --quiet --request-timeout="${REQUEST_TIMEOUT}s" \
+             -- chroot /host cat "${dir}${f}" > "${out_dir}/${name}/${f}" 2>/dev/null &&
+           [[ -s "${out_dir}/${name}/${f}" ]]; then
+          log_ok "collected ${name}/${f}"
+        else
+          rm -f "${out_dir}/${name}/${f}"
+        fi
+      done
+    done
+  done
+  log_info "collected dumps under ${out_dir}"
+}
+
 cmd_disable() {
   oc_ delete mc "${MC_NAME}" --ignore-not-found
   log_info "Waiting for the ${MSHV_MCP_NAME} pool to roll back (nodes will reboot)..."
@@ -208,6 +266,7 @@ case "${1:-verify}" in
   enable)  cmd_enable ;;
   verify)  cmd_verify ;;
   list)    cmd_list ;;
+  collect) cmd_collect ;;
   disable) cmd_disable ;;
-  *) log_error "Unknown action '${1}'. Use: enable|verify|list|disable"; exit 1 ;;
+  *) log_error "Unknown action '${1}'. Use: enable|verify|list|collect|disable"; exit 1 ;;
 esac
