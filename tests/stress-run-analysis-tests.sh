@@ -57,6 +57,13 @@ printf '2026-01-01T04:00:10Z\t10\tboot-6\tUnknown\n' >> "$d/poll.tsv"
 printf '2026-01-01T04:00:20Z\t20\tboot-6\tTrue\n'    >> "$d/poll.tsv"
 { echo "# load_start_uptime=1.0"; echo -e "SAMPLE\t30.0\t$((50*2**30))\t500"; } > "$d/telemetry.tsv"
 
+# --- run F: setup broke, so the "no crash" means nothing ----------------
+d="$(mk_run 20260101T050000Z-fff-s64 1 64 900)"
+printf '2026-01-01T05:00:00Z\t0\tboot-8\tTrue\n' >> "$d/poll.tsv"
+printf '2026-01-01T05:00:10Z\t10\tboot-8\tTrue\n' >> "$d/poll.tsv"
+{ echo "# preflight_bytes=0"
+  echo "# SETUP_FAILED preflight moved only 0 bytes; aborting run"; } > "$d/telemetry.tsv"
+
 out="$(python3 "${REPO_ROOT}/scripts/20-analyze-stress-runs.py" "${RUNS}")"
 printf '%s\n' "${out}" > "${TMPDIR}/out.txt"
 
@@ -108,4 +115,10 @@ row_e="$(grep -E '^20260101T040000Z-eee-s64' <<< "${out}")"
 grep -qE 'eee-s64.*MEANINGFUL' <<< "${out}" \
   || { echo "FAIL: recovered run should be a meaningful survivor"; echo "${out}"; exit 1; }
 
-printf 'stress-run-analysis-tests: OK (5 fixtures)\n'
+# A run whose setup failed must never be presented as a clean survival.
+grep -qE 'fff-s64.*SETUP FAILED' <<< "${out}" \
+  || { echo "FAIL: setup-failed run must be flagged void"; echo "${out}"; exit 1; }
+grep -qE 'fff-s64.*MEANINGFUL' <<< "${out}" \
+  && { echo "FAIL: setup-failed run must NOT be called meaningful"; echo "${out}"; exit 1; }
+
+printf 'stress-run-analysis-tests: OK (6 fixtures)\n'

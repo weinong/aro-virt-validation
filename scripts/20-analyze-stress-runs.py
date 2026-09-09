@@ -129,7 +129,12 @@ def analyse(run_dir):
         else:
             bytes_at_reset = peak_bytes
 
+    setup_failed = any(c.startswith("SETUP_FAILED") for c in comments)
+    preflight = next((c.split("=", 1)[1] for c in comments
+                      if c.startswith("preflight_bytes=")), None)
     return {
+        "setup_failed": setup_failed,
+        "preflight": preflight,
         "run_id": os.path.basename(run_dir.rstrip("/")),
         "node": meta.get("node", "?"),
         "streams": meta.get("streams", "?"),
@@ -192,7 +197,12 @@ def main():
     if survived:
         print("\n--- runs that did NOT reset (negative controls) ---")
         for r in survived:
-            verdict = "MEANINGFUL" if r["peak_bytes"] else "NO TRAFFIC: void, prove the load ran"
+            if r["setup_failed"]:
+                verdict = "SETUP FAILED: void, the load never ran"
+            elif r["peak_bytes"]:
+                verdict = "MEANINGFUL"
+            else:
+                verdict = "NO TRAFFIC: void, prove the load ran"
             print(f"  {r['run_id']:<34} l1vh={r['l1vh']} pushed {gib(r['peak_bytes'])} GiB "
                   f"in {r['duration']}s -> {verdict}")
 

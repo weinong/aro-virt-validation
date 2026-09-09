@@ -65,6 +65,11 @@ on_node() {
 
 remote_stress() {
   local run_id="$1"
+  # Unique per run. A panic leaves /var/run/netns/<name> as a stale bind mount
+  # that `ip netns del` cannot remove ("Device or resource busy"), so a fixed
+  # name makes every later run collide and silently move zero bytes.
+  local uniq="${run_id//[^0-9]/}"; uniq="${uniq: -6}"
+  local ns="${NS_NAME}${uniq}" ifc="cs${uniq}"
   cat <<REMOTE
 set -u
 tel=${NODE_TELEMETRY}/${run_id}
@@ -75,37 +80,66 @@ durable() { dd of="\$TEL" oflag=append conv=notrunc,fsync status=none; }
 log() { printf '%s\n' "\$*" | durable; }
 
 log "# run_id=${run_id} streams=${STREAMS} duration=${DURATION}"
+log "# netns=${ns} iface=${ifc}0"
 log "# node=\$(hostname) kernel=\$(uname -r) boot_id=\$(cat /proc/sys/kernel/random/boot_id)"
 log "# l1vh=\$(dmesg 2>/dev/null | grep -c 'running as L1VH partition') mshv_root=\$(grep -c '^mshv_root' /proc/modules)"
 log "# nokaslr=\$(grep -c nokaslr /proc/cmdline) uptime_at_start=\$(cut -d' ' -f1 /proc/uptime)"
 
-ip netns del ${NS_NAME} 2>/dev/null || true
-ip link del ${NS_NAME}0 2>/dev/null || true
-ip netns add ${NS_NAME}
-ip link add ${NS_NAME}0 type veth peer name ${NS_NAME}1
-ip link set ${NS_NAME}1 netns ${NS_NAME}
-ip addr add 10.244.240.1/30 dev ${NS_NAME}0
-ip link set ${NS_NAME}0 up mtu 9000
-ip netns exec ${NS_NAME} ip addr add 10.244.240.2/30 dev ${NS_NAME}1
-ip netns exec ${NS_NAME} ip link set ${NS_NAME}1 up mtu 9000
-ip netns exec ${NS_NAME} ip link set lo up
+# Thorough teardown first: a half-torn-down netns from a previous run leaves an
+# orphaned veth (LOWERLAYERDOWN) and the load then moves zero bytes while the
+# run still looks like a clean "no crash".
+pkill -x socat 2>/dev/null || true
+# Force-clear stale namespaces from earlier panicked runs.
+for old in /var/run/netns/${NS_NAME}*; do
+  [ -e "\$old" ] || continue
+  umount -l "\$old" 2>/dev/null || true
+  rm -f "\$old" 2>/dev/null || true
+done
+for oldif in \$(ls /sys/class/net | grep -E '^(cs[0-9]+0|${NS_NAME}0)\$' 2>/dev/null); do
+  ip link del "\$oldif" 2>/dev/null || true
+done
+# Belt and braces: drop the address from anything still holding it.
+for holder in \$(ip -o -4 addr show 2>/dev/null | awk '/10\\.244\\.240\\./{print \$2}' | sort -u); do
+  ip addr flush dev "\$holder" 2>/dev/null || true
+done
+ip netns add ${ns}
+ip link add ${ifc}0 type veth peer name ${ifc}1
+ip link set ${ifc}1 netns ${ns}
+ip addr add 10.244.240.1/30 dev ${ifc}0
+ip link set ${ifc}0 up mtu 9000
+ip netns exec ${ns} ip addr add 10.244.240.2/30 dev ${ifc}1
+ip netns exec ${ns} ip link set ${ifc}1 up mtu 9000
+ip netns exec ${ns} ip link set lo up
 
 # Force SOFTWARE checksum on transmit.
-ethtool -K ${NS_NAME}0 tx off rx off >/dev/null 2>&1 || true
-ip netns exec ${NS_NAME} ethtool -K ${NS_NAME}1 tx off rx off >/dev/null 2>&1 || true
-ethtool -k ${NS_NAME}0 2>/dev/null | grep -E '^(tx-checksumming|rx-checksumming|generic-segmentation-offload|tcp-segmentation-offload)' \
+ethtool -K ${ifc}0 tx off rx off >/dev/null 2>&1 || true
+ip netns exec ${ns} ethtool -K ${ifc}1 tx off rx off >/dev/null 2>&1 || true
+ethtool -k ${ifc}0 2>/dev/null | grep -E '^(tx-checksumming|rx-checksumming|generic-segmentation-offload|tcp-segmentation-offload)' \
   | while read -r l; do log "# offload \$l"; done
 
 (socat -u TCP-LISTEN:5401,reuseaddr,fork /dev/null &) 2>/dev/null
 sleep 2
+
+# PREFLIGHT: prove the path actually carries traffic before claiming anything.
+# Without this a broken netns yields a silent false negative.
+pre_rx=\$(cat /sys/class/net/${ifc}0/statistics/rx_bytes 2>/dev/null || echo 0)
+timeout 3 ip netns exec ${ns} socat -u OPEN:/dev/zero TCP:10.244.240.1:5401,nodelay 2>/dev/null || true
+post_rx=\$(cat /sys/class/net/${ifc}0/statistics/rx_bytes 2>/dev/null || echo 0)
+moved=\$(( post_rx - pre_rx ))
+log "# preflight_bytes=\$moved"
+if [ "\$moved" -lt 1048576 ]; then
+  log "# SETUP_FAILED preflight moved only \$moved bytes; aborting run"
+  ip -br addr show ${ifc}0 2>&1 | while read -r l; do log "# diag \$l"; done
+  exit 90
+fi
 
 # Sample cumulative counters every second. This is the record that decides
 # whether the fault is volume-driven, so it is flushed on every line.
 ( while true; do
     printf 'SAMPLE\t%s\t%s\t%s\n' \
       "\$(cut -d' ' -f1 /proc/uptime)" \
-      "\$(cat /sys/class/net/${NS_NAME}0/statistics/rx_bytes 2>/dev/null || echo 0)" \
-      "\$(cat /sys/class/net/${NS_NAME}0/statistics/rx_packets 2>/dev/null || echo 0)" | durable
+      "\$(cat /sys/class/net/${ifc}0/statistics/rx_bytes 2>/dev/null || echo 0)" \
+      "\$(cat /sys/class/net/${ifc}0/statistics/rx_packets 2>/dev/null || echo 0)" | durable
     sleep 1
   done ) &
 monitor=\$!
@@ -115,7 +149,7 @@ end=\$((SECONDS+${DURATION}))
 while [ \$SECONDS -lt \$end ]; do
   i=0
   while [ \$i -lt ${STREAMS} ]; do
-    ip netns exec ${NS_NAME} socat -u OPEN:/dev/zero TCP:10.244.240.1:5401,nodelay 2>/dev/null &
+    ip netns exec ${ns} socat -u OPEN:/dev/zero TCP:10.244.240.1:5401,nodelay 2>/dev/null &
     i=\$((i+1))
   done
   wait
@@ -211,9 +245,9 @@ cmd_fetch() {
 cmd_clean() {
   local node; node="$(pick_node)"
   [[ -n "${node}" ]] || return 0
-  on_node "${node}" "pkill -f 'TCP-LISTEN:5401' 2>/dev/null || true
+  on_node "${node}" "pkill -x socat 2>/dev/null || true
     ip netns del ${NS_NAME} 2>/dev/null || true
-    ip link del ${NS_NAME}0 2>/dev/null || true
+    ip link del ${ifc}0 2>/dev/null || true
     echo cleaned" || true
   log_ok "cleaned ${node}"
 }
