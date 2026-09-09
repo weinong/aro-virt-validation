@@ -247,11 +247,43 @@ unavoidable whenever the device cannot offload it, and on this platform
 `tx-checksum-ip-generic` is `off [fixed]` on both the synthetic uplink and the
 MANA VF.
 
+### Reproduction record
+
+| run | node | kernel | duration | traffic | resets |
+|---|---|---|---:|---:|---:|
+| 1 | mshv `66wzs` | 6.12 el10 (L1VH) | 1800 s | n/a | **1 @ t=138 s** |
+| 2 | mshv `66wzs` | 6.12 el10 (L1VH) | 900 s | n/a | **1 @ t=138 s** |
+| 3 | mshv `66wzs` | 6.12 el10 (L1VH) | 600 s | n/a | **1 @ t=138 s** |
+| 4 | worker `f85hk` | 5.14 el9 (no L1VH) | 900 s | not measured | 0 |
+| 5 | worker `f85hk` | 5.14 el9 (no L1VH) | 180 s | **367 GB** | 0 |
+
+Three L1VH reproductions at **exactly t=138 s**, each confirmed by a captured
+panic with `Comm: socat`, `RIP: csum_partial+0xe5` and no OVS frame in the call
+trace. The repeatability of 138 s suggests a volume- or allocation-driven
+threshold rather than chance.
+
+**The non-L1VH comparison is NOT a clean control.** Three variables differ at
+once: L1VH platform, kernel (6.12 el10 vs 5.14 el9) and VM size/NIC
+(D192ds_v6/MANA vs D8s_v5). A negative there cannot attribute the difference to
+the platform. It does establish that this is **not a universal Linux behaviour**:
+367 GB through the identical code path on the comparison node produced nothing.
+
+### A harness bug that invalidated earlier negatives
+
+`oc debug --request-timeout=30s` bounds the **entire streamed command**, so the
+stress was being killed after 30 s while the harness happily reported "no reset
+in 900 s". Every negative result produced before this was fixed is worthless. Now
+`--request-timeout=0` is used and the remote script prints periodic
+`host_rx_bytes`, so a negative result is only believable when accompanied by
+throughput evidence.
+
+The three L1VH positives predate the fix but remain valid: the captured panics
+show `Comm: socat` on the TCP transmit path, which proves the stress was running
+at fault time.
+
 ### Caveats
 
-- Both reproductions were on the same node and kernel. **Not yet tested on a
-  non-L1VH machine**, which is the obvious next step to establish whether this is
-  platform-specific or a generic kernel bug.
+- All L1VH reproductions were on the same node and kernel build.
 - Disabling `tx-checksumming` on a veth also forces TSO off, so the exact skb
   shape differs from the OVS paths. The fault signature is nevertheless identical.
 - t=138 s twice is suggestive of a volume-driven threshold rather than chance,

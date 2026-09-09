@@ -90,6 +90,15 @@ ip netns exec ${NS_NAME} ip link set ${NS_NAME}1 mtu 9000 || true
 # Sink in the host ns, senders in the netns.
 (socat -u TCP-LISTEN:5401,reuseaddr,fork /dev/null &) 2>/dev/null
 sleep 2
+# Report throughput as we go. Without this a "no reset" result is worthless:
+# we could not tell a genuinely stable node from a stress that never ran.
+( while true; do
+    sleep 30
+    b=\$(cat /sys/class/net/${NS_NAME}0/statistics/rx_bytes 2>/dev/null || echo 0)
+    echo "PROGRESS t=\${SECONDS}s host_rx_bytes=\$b"
+  done ) &
+monitor=\$!
+
 end=\$((SECONDS+${DURATION}))
 while [ \$SECONDS -lt \$end ]; do
   i=0
@@ -99,6 +108,8 @@ while [ \$SECONDS -lt \$end ]; do
   done
   wait
 done
+kill \$monitor 2>/dev/null || true
+echo "FINAL host_rx_bytes=\$(cat /sys/class/net/${NS_NAME}0/statistics/rx_bytes 2>/dev/null || echo 0)"
 REMOTE
 }
 
@@ -116,7 +127,7 @@ cmd_run() {
 
   # Run the stress detached; the debug pod dies with the node if it panics.
   ( timeout "$(( DURATION + 120 ))" oc debug "node/${node}" --quiet \
-      --request-timeout="${REQUEST_TIMEOUT}s" -- chroot /host bash -c "$(remote_script)" \
+      --request-timeout=0 -- chroot /host bash -c "$(remote_script)" \
       > "${out}/stress-${node}.log" 2>&1 || true ) &
   local stress_pid=$!
 
