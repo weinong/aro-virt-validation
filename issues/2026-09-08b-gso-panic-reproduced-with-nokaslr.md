@@ -393,6 +393,108 @@ State was restored: `mshv_root` reloaded, `/dev/mshv` present, both nodes
 advertising `devices.kubevirt.io/mshv`, virt-handler Running on both, HCO
 Available, load namespace removed.
 
+## kdump: no vmcore yet, but a network-independent reproducer of the fault
+
+Goal was a vmcore to inspect the page tables at fault time. kdump is now enabled
+on the pool (`make mshv-kdump`, `scripts/16-mshv-kdump.sh`), armed and verified
+on both nodes:
+
+```
+cmdline_crashkernel=crashkernel=8G,high,crashkernel=256M,low
+kexec_crash_size=8858370048   kexec_crash_loaded=1
+kdump_enabled=enabled         kdump_active=active
+```
+
+**Practical win:** `vmcore-dmesg.txt` is now captured to `/var/crash` on every
+panic. The full panic log no longer depends on the Azure serial console, which is
+blocked by the managed-RG deny assignment. That removes the evidence-access
+problem from the 09-01 and 09-03 reports.
+
+**But `makedumpfile` cannot complete a dump — and why it fails is the finding.**
+
+Validated end to end with `echo c > /proc/sysrq-trigger` (five cycles). The crash
+kernel boots and saves the dmesg, then:
+
+| core_collector | Result |
+|---|---|
+| `makedumpfile -l -d 31` (stock, lzo) | **SIGSEGV**, exit 139, after ~190 MB |
+| `makedumpfile -c -d 31` (zlib) | **SIGSEGV**, exit 139 — not the compressor |
+| `makedumpfile --non-mmap -c -d 31` | clean **exit 1** with an error message |
+
+`--non-mmap` converting a SIGSEGV into a clean error is itself the clue: with
+mmap, touching the offending page kills the process; with `read()`, the kernel
+returns an error instead. The error:
+
+```
+read_from_vmcore: Can't read the dump memory(/proc/vmcore). Bad address
+readpage_elf: Can't read the dump memory(/proc/vmcore).
+readmem: type_addr: 1, addr:108c90000, size:4096
+read_pfn: Can't get the page data.
+makedumpfile Failed.
+```
+
+`Bad address` is **EFAULT reading a 4 KiB page of ordinary System RAM**.
+
+Checks done on that address:
+
+- `0x108c90000` (~4.14 GiB) is inside `BIOS-e820 [mem 0x100000000-0xfbfffffff] usable`
+  and inside `/proc/iomem` `100000000-fbfffffff : System RAM`. Nothing special.
+- It is **not** in either crashkernel reservation
+  (`0x1f000000-0x2effffff` low, `0xbeff000000-0xc0feffffff` high), so this is not
+  a reservation artifact.
+- The failing address **moves between crashes**: `0x108c90000` (~4.1 GiB) on one,
+  `0x610a8b0000` (~388 GiB) on the next. It is not one fixed poisoned page.
+
+### Why this matters
+
+This is a **network-independent, deterministic demonstration that some pages of
+ordinary System RAM are inaccessible on this host**. No skb, no Geneve, no OVS,
+no `csum_partial` — just a sequential read of physical memory that faults.
+
+That is precisely the condition needed to explain the panic: `csum_partial`'s
+tail over-read steps into the next page, and on this host the next page can be
+inaccessible. It reframes the defect — the networking path is the **exposure**
+(the only high-volume producer of software checksums over page frags), not the
+cause.
+
+### Caveats — this is not yet proof
+
+- `/proc/vmcore` reads *old* (pre-crash) memory through the crash kernel's own
+  mapping. The EFAULT may reflect that mapping rather than a hardware- or
+  hypervisor-level inaccessibility. It has **not** been shown that the same page
+  is unreadable from a normally running kernel.
+- Nothing here ties the unreadable pages to `mshv`/L1VH specifically. There is no
+  balloon or hot-plug activity, and `/sys/kernel/debug/mshv/partition` exists but
+  was not correlated with the failing addresses.
+- **Still no vmcore**, so the page tables and the skb at fault time remain
+  uninspected. `makedumpfile` 1.7.8 has no ignore-read-error option, so the
+  unreadable page aborts the whole dump.
+
+### Notes for anyone repeating this
+
+- `kdump.sh` expands `$CORE_COLLECTOR` **unquoted**, so an inline
+  `/bin/sh -c '...'` wrapper is word-split and fails instantly with exit 2. The
+  collector must be a single word; `scripts/16-mshv-kdump.sh` installs a wrapper
+  script and pulls it into the initramfs with `extra_bins`.
+- The stock collector writes only to `/dev/console`, i.e. the serial console we
+  cannot read. The wrapper saves `makedumpfile.log` next to the dump and
+  preserves the exit code, which is what made the EFAULT visible at all.
+- Raising `crashkernel` from 2 G to 8 G changed nothing; this was never a
+  crash-kernel memory problem.
+
+### Next steps from here
+
+- [ ] Test whether the same physical page is readable from a **running** kernel
+      (e.g. `/proc/kcore` at `PAGE_OFFSET + phys`, which `nokaslr` makes
+      computable). That distinguishes a `/proc/vmcore` mapping artifact from real
+      platform-level inaccessibility.
+- [ ] Determine whether the unreadable pages correspond to memory the hypervisor
+      has taken (mshv deposit / child-partition donation).
+- [ ] Get a usable vmcore despite the bad page: a `makedumpfile` build that skips
+      read errors, or a dump restricted to a known-good range.
+- [ ] Repeat on a non-L1VH node to see whether unreadable System RAM is unique to
+      this platform.
+
 ## Reproducer defects found and fixed
 
 The first run of the day reported `resets=0` **while the sender was actually

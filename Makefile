@@ -458,6 +458,19 @@ techpreview-crd-ordering-fix: ## Detect/pre-apply payload CRDs mis-ordered after
 mshv-nokaslr: ## Disable kernel ASLR on the mshv pool (drains/reboots nodes)
 	@bash ./scripts/04a-mshv-nokaslr.sh
 
+.PHONY: mshv-kdump mshv-kdump-verify mshv-kdump-list mshv-kdump-disable
+mshv-kdump: ## Enable kdump on the mshv pool to capture panic vmcores (reboots nodes)
+	@bash ./scripts/16-mshv-kdump.sh enable
+
+mshv-kdump-verify: ## Check the crash kernel is armed on every mshv node
+	@bash ./scripts/16-mshv-kdump.sh verify
+
+mshv-kdump-list: ## List captured crash dumps on the mshv nodes
+	@bash ./scripts/16-mshv-kdump.sh list
+
+mshv-kdump-disable: ## Remove the kdump MachineConfig (reboots nodes)
+	@bash ./scripts/16-mshv-kdump.sh disable
+
 mshv-node: ## Create and verify the declarative MSHV node
 	@./scripts/04-mshv-node-setup.sh
 
