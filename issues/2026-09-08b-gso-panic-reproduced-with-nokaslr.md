@@ -478,14 +478,45 @@ is still real and still blocks vmcore capture; only the interpretation changed.
 - Raising `crashkernel` from 2 G to 8 G changed nothing; this was never a
   crash-kernel memory problem.
 
+### Attempts to unblock the dump (all failed)
+
+Eight sysrq-triggered crash cycles, one variable at a time:
+
+| # | Change | Result |
+|---|---|---|
+| 1 | stock `-l -d 31`, `crashkernel=2G` | SIGSEGV, exit 139, ~190 MB |
+| 2 | `crashkernel` 2G -> 8G | identical — never a memory problem |
+| 3 | `-l` -> `-c` (zlib) | identical — not the compressor |
+| 4 | inline `sh -c` collector wrapper | exit 2 instantly — `kdump.sh` word-splits `$CORE_COLLECTOR` |
+| 5 | wrapper script + `extra_bins` | error finally captured to disk |
+| 6 | `--non-mmap` | SIGSEGV -> clean exit 1 with EFAULT message |
+| 7 | `KEXEC_ARGS="-s"` -> `""` (kexec_file_load -> kexec_load) | **0.1-52% -> 75.4%, 1.4 GB** |
+| 8 | repeat of 7 | 75%-ish again, same failure |
+
+Attempt 7 is the only one that moved the needle, and it is now the script default:
+the two load paths build different elfcorehdr `PT_LOAD` ranges, and the userspace
+one describes old memory better on this host.
+
+The remaining failures cluster: `0x910b83d000` (~583 GiB) and `0x9197569000`
+(~585 GiB), versus the scattered `0x108c90000` / `0x610a8b0000` seen with
+`kexec_file_load`. Both of those regions read fine from the live kernel, so this
+still looks like a crash-kernel `/proc/vmcore` limitation rather than bad memory.
+
+`makedumpfile` 1.7.8 has **no option to continue past a read error** (the full
+option list has nothing equivalent), so a single unreadable page aborts the
+entire dump. That is the hard blocker.
+
 ### Next steps from here
 
 - [x] Test whether the direct map is readable from a **running** kernel. **Done**
       — all 201,325,240 pages readable on both nodes; see the retraction above.
 - [ ] Determine whether the unreadable pages correspond to memory the hypervisor
       has taken (mshv deposit / child-partition donation).
-- [ ] Get a usable vmcore despite the bad page: a `makedumpfile` build that skips
-      read errors, or a dump restricted to a known-good range.
+- [ ] Get a usable vmcore despite the bad page. Untried ideas, in rough order of
+      promise: `--split` (per-range children, so one bad range need not kill the
+      others), `-e` (exclude unused vmemmap pages, fewer reads), a patched
+      `makedumpfile` that skips read errors, or reporting the `/proc/vmcore`
+      EFAULT itself as a kdump bug on this platform.
 - [ ] Give the kcore probe a **positive control** so a negative result can be
       trusted: construct a known-inaccessible mapped page and confirm the probe
       reports it.

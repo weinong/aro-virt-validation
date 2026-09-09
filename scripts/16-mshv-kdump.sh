@@ -46,6 +46,16 @@ CRASHKERNEL_LOW="${CRASHKERNEL_LOW:-256M}"
 # --non-mmap avoids makedumpfile taking SIGSEGV on inaccessible pages.
 CORE_COLLECTOR="${CORE_COLLECTOR:-makedumpfile --non-mmap -c -d 31 --message-level 7}"
 COLLECT_WRAPPER="${COLLECT_WRAPPER:-/usr/local/bin/kdump-collect}"
+# "-s" = kexec_file_load (kernel builds the elfcorehdr describing old memory);
+# empty = kexec_load, where kexec-tools builds it from /proc/iomem instead. The
+# two produce different PT_LOAD ranges, which matters when /proc/vmcore reads
+# return EFAULT. Everything else here mirrors the RHCOS stock file, which is
+# overwritten wholesale because it is shell-sourced and has no drop-in support.
+# Default to kexec_load (empty) rather than the RHCOS stock "-s"
+# (kexec_file_load): measured on these nodes, kexec_file_load aborted the dump
+# after ~0.1-52% while kexec_load reached ~75%, because the two build different
+# elfcorehdr PT_LOAD ranges. ${VAR-default} so an explicitly empty value survives.
+KEXEC_ARGS="${KEXEC_ARGS-}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-30}"
 DEBUG_TIMEOUT="${DEBUG_TIMEOUT:-240}"
 
@@ -90,6 +100,21 @@ WRAP
   kdump_conf="$(printf '%s\n' 'auto_reset_crashkernel yes' 'path /var/crash' \
     "extra_bins ${COLLECT_WRAPPER}" "core_collector ${COLLECT_WRAPPER}")"
 
+  log_info "KEXEC_ARGS: '${KEXEC_ARGS}' ($([[ -n "${KEXEC_ARGS}" ]] && echo kexec_file_load || echo kexec_load))"
+  local sysconfig_kdump
+  sysconfig_kdump="$(cat <<SYSCONF
+KDUMP_KERNELVER=""
+KDUMP_COMMANDLINE=""
+KDUMP_COMMANDLINE_REMOVE="hugepages hugepagesz slub_debug quiet log_buf_len swiotlb cma hugetlb_cma ignition.firstboot"
+KDUMP_COMMANDLINE_APPEND="irqpoll nr_cpus=1 reset_devices cgroup_disable=memory mce=off numa=off udev.children-max=2 panic=10 acpi_no_memhotplug transparent_hugepage=never nokaslr hest_disable novmcoredd cma=0 hugetlb_cma=0 pcie_ports=compat kfence.sample_interval=0 initramfs_options=size=90%"
+FADUMP_COMMANDLINE_APPEND=""
+KEXEC_ARGS="${KEXEC_ARGS}"
+KDUMP_IMG="vmlinuz"
+KDUMP_IMG_EXT=""
+VMCORE_CREATION_NOTIFICATION="yes"
+SYSCONF
+)"
+
   oc_ apply -f - <<EOF
 apiVersion: machineconfiguration.openshift.io/v1
 kind: MachineConfig
@@ -108,6 +133,11 @@ spec:
           overwrite: true
           contents:
             source: "data:text/plain;charset=utf-8;base64,$(printf '%s\n' "${wrapper}" | base64 -w0)"
+        - path: /etc/sysconfig/kdump
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,$(printf '%s\n' "${sysconfig_kdump}" | base64 -w0)"
         - path: /etc/kdump.conf
           mode: 0644
           overwrite: true
