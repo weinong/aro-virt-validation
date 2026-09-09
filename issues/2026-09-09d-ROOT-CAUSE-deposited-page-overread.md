@@ -11,8 +11,17 @@
 
 ## The mechanism
 
-1. `csum_partial`'s tail path deliberately reads a full 8 bytes and masks off the
-   excess — a benign over-read of up to 7 bytes past the buffer.
+1. `csum_partial`'s tail path calls `load_unaligned_zeropad()`, which deliberately
+   reads a full 8 bytes and masks off the excess — an over-read of up to 7 bytes
+   past the buffer. Byte-matched in the panic `Code:`:
+
+   ```
+   f7 de           neg    %esi          \
+   c1 e6 03        shl    $0x3,%esi      |  shift = (-len << 3) & 63
+   83 e6 3f        and    $0x3f,%esi    /
+   48 8b 00        mov    (%rax),%rax   <- FAULTS: load_unaligned_zeropad()
+   ```
+
 2. The buffer ends within 8 bytes of a 4 KiB page boundary, so the read crosses
    into the **next** page. (This is why 217/217 faults sit at page offsets
    `0xff9`–`0xfff`.)
@@ -22,8 +31,34 @@
 4. The access raises **`#GP`** in interrupt context → `Kernel panic - not
    syncing: Fatal exception in interrupt` → reboot.
 
-On any normal host the adjacent page is always accessible, which is exactly why
-upstream considers this over-read safe.
+### The over-read is *supposed* to be survivable
+
+This is the crux, and it is why "a 10-year-old over-read" is not itself the bug.
+`load_unaligned_zeropad()` is annotated with an exception-table fixup:
+
+```c
+asm volatile(
+    "1:	mov %[mem], %[ret]\n"
+    "2:\n"
+    _ASM_EXTABLE_TYPE(1b, 2b, EX_TYPE_ZEROPAD)     /* type 20 */
+```
+
+`EX_TYPE_ZEROPAD` = "longword load with zeropad on fault". The kernel *expects*
+this load to fault off the end of a buffer, and on a normal host it does: the
+read lands in an unmapped page, takes a **`#PF`**, `ex_handler_zeropad()`
+substitutes zero-padded data, and execution continues. Nothing crashes. That is
+why the over-read has been safe for a decade.
+
+It fails here only because the hypervisor delivers **`#GP`**, not `#PF`, and the
+zeropad fixup does not rescue a `#GP` — so an over-read the kernel is designed
+to absorb becomes fatal.
+
+> Verified: the faulting instruction is the zeropad load, it carries an
+> `EX_TYPE_ZEROPAD` entry, and it panicked regardless. Inferred (not verified on
+> this kernel): the fixup is skipped because `exc_general_protection()` passes
+> `fault_addr = 0`, so `ex_handler_zeropad()`'s check that the fault address is
+> the next word cannot succeed. Confirming this needs `arch/x86/mm/extable.c`,
+> which is not in `kernel-devel`.
 
 ## The evidence
 
@@ -193,7 +228,33 @@ seconds; it is an accelerant, not a different mechanism.
 A bare-metal RHEL + QEMU/libvirt L1VH test has no OVS datapath and no overlay
 demanding an inner checksum, and virtio-net hands frames over as
 `CHECKSUM_PARTIAL` without touching the bytes. It generates essentially none of
-these walks, so the bug stays invisible however long the test runs.
+these checksum walks — so this trigger disappears.
+
+### Why networking, when the hazard is generic memory?
+
+The hazard is not networking-specific and neither is `load_unaligned_zeropad()`:
+`strscpy()` and the dcache path (`dentry_string_cmp()`, `hash_name()`) use the
+same over-reading load, and would fault identically on a deposited neighbour.
+Removing OVS therefore lowers the rate by orders of magnitude; it does not prove
+the hazard is gone. Networking dominates for two compounding reasons:
+
+**It over-reads across page boundaries constantly, by construction.** An MTU
+payload of 1500 bytes has `1500 & 7 == 4`, so the tail load begins 4 bytes before
+the buffer end and reads 8 — 4 bytes into the next page. skb page frags are
+carved from page-allocator pages and routinely run to the page boundary, so a
+large fraction of ordinary packets perform a cross-page over-read. That is why
+all 217 observed faults straddle a boundary rather than a handful.
+
+**Its buffers share an allocator with the deposits.** skb frags come from the
+page allocator, and `hv_call_deposit_pages()` takes *single* pages from that same
+buddy pool (98% `count=1`). Network buffers and hypervisor-owned pages are drawn
+from the same free lists and so become physical neighbours far more often than
+slab-backed data — a dcache name sits inside a multi-object slab page whose
+neighbours are almost always more slab.
+
+By contrast the dcache/strscpy users over-read short strings that rarely end
+within 7 bytes of a page boundary, and whose neighbouring page is rarely a
+deposited one. Same defect, vastly lower exposure.
 
 **3. Deposited pages must be scattered next to hot network buffers.** They are,
 because deposits are overwhelmingly *single* pages taken from the buddy
@@ -218,24 +279,37 @@ lands on a poisoned neighbour within seconds.
 
 ## Where the defect actually is
 
-The kernel deposits pages that are **adjacent to pages still in use by the rest
-of the kernel**, while `csum_partial` (and any other function using the same
-read-8-and-mask tail idiom) may legitimately over-read up to 7 bytes past a
-buffer. Those two facts are incompatible on a root partition. Candidate fixes,
-for whoever owns this:
+Two facts are incompatible on a root partition: the kernel deposits pages that
+are **adjacent to pages still in use by the rest of the kernel**, and
+`load_unaligned_zeropad()` may legitimately over-read up to 7 bytes past a
+buffer. Crucially, the kernel already has a contract for the second fact — the
+`EX_TYPE_ZEROPAD` fixup — and the platform breaks that contract by signalling
+`#GP` instead of `#PF`. Candidate fixes, for whoever owns this:
 
-1. **Isolate deposited memory.** Allocate deposit pages so they are never
+1. **Deliver the fault as `#PF`, or keep deposited pages readable.** If touching
+   a deposited page produced a page fault instead of `#GP`, the existing
+   `ex_handler_zeropad()` would substitute zero-padded data and execution would
+   continue — exactly as on every normal host. This fixes the whole class at
+   once, including the `strscpy()` and dcache users of the same idiom, without
+   touching any hot path. This is the most contained fix and belongs in the
+   hypervisor / mshv page-donation path.
+2. **Isolate deposited memory.** Allocate deposit pages so they are never
    adjacent to pages the kernel may over-read into — e.g. deposit at a coarser
-   granularity, or from a reserved region. The current path uses
-   `alloc_page()`/`split_page()` and hands over single pages scattered
-   throughout normal memory.
-2. **Make the over-read safe.** Have the hypervisor leave deposited pages
-   readable to the root partition, or fault them benignly instead of `#GP`.
-3. **Stop over-reading.** Change `csum_partial`'s tail to a bounded read. This is
-   the least attractive: it is a long-standing, deliberate optimisation and the
-   idiom appears elsewhere (`load_unaligned_zeropad()` has the same shape).
+   granularity, or from a reserved region. The current path hands over single
+   pages scattered throughout normal memory (98% `count=1`). Also effective, but
+   it only removes the adjacency; the underlying `#GP`-instead-of-`#PF`
+   contract violation would remain for any other route to a deposited page.
+3. **Extend the fixup to `#GP`.** Teach the zeropad handler to recover from a
+   `#GP` with no fault address. Plausible but risky — `#GP` carries no address,
+   so the handler cannot verify the fault was the benign next-word case, and
+   silently zero-padding genuine `#GP`s would mask real bugs.
+4. **Stop over-reading.** Change `csum_partial`'s tail to a bounded read. Least
+   attractive: it is a deliberate long-standing optimisation, and it fixes only
+   `csum_partial` while leaving every other `load_unaligned_zeropad()` caller
+   exposed.
 
-Option 1 looks the most contained, and it is squarely in `hv_call_deposit_pages()`.
+Option 1 is preferred: it restores an invariant the kernel already relies on,
+rather than working around its violation.
 
 ## Reproducing
 
