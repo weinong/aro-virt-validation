@@ -299,6 +299,100 @@ and no Hyper-V intercept messages.
 - [ ] When reporting upstream, lead with the **page-straddling tail over-read on
       an L1VH host**, not with "non-canonical pointer".
 
+## Why only the Geneve path? (offload flags)
+
+`csum_partial` is called constantly, so the obvious objection is that this should
+crash everywhere. It does not, and the captured offload flags explain why.
+Verbatim `ethtool -k eth0` on `l7njd` (the MANA VF `enP30832s1` is identical):
+
+```
+tx-checksumming: on
+        tx-checksum-ipv4: on
+        tx-checksum-ip-generic: off [fixed]
+        tx-checksum-ipv6: on
+tx-udp_tnl-segmentation: off [fixed]
+tx-udp_tnl-csum-segmentation: off [fixed]
+tx-gso-partial: off [fixed]
+```
+
+1. **Plain TCP is offloaded.** `tx-checksum-ipv4/ipv6: on`, so ordinary TX is
+   `CHECKSUM_PARTIAL` and the NIC computes the checksum; `csum_partial` never
+   touches the payload. It is called often, but almost never over bulk data.
+2. **Encapsulated traffic cannot be.** `tx-checksum-ip-generic: off [fixed]`
+   means the inner checksum cannot be offloaded, and both `tx-udp_tnl-*` flags
+   are `off [fixed]`, so Geneve-encapsulated TCP must be segmented **and**
+   checksummed in software inside the guest.
+3. **This is the only path that runs `__skb_checksum` over
+   `skb_shinfo->frags[]`** — page-allocator pages, where a frag ending exactly
+   on a 4 KiB boundary is routine and the tail over-read steps into an unrelated
+   neighbouring physical page.
+
+So the Geneve path is not special because it is Geneve; it is the only
+high-volume producer of **software checksums over page-frag payloads**. OVS
+matters only as the thing driving the encapsulation.
+
+**Caveat:** "frag, not slab" is not provable from the dump alone. Both live in
+the direct map, and an 884-byte kmalloc-1k object can also end exactly on a page
+boundary. This is the leading explanation, not a proven one.
+
+### Bearing on the earlier bare-metal L1VH testing
+
+Bare-metal L1VH/MSHV/QEMU testing without OVS/Geneve would leave checksums to
+the NIC, so `__skb_checksum`-over-frags essentially never executes. That testing
+therefore **does not exonerate L1VH** — it never exercised this path, and it also
+used a different kernel and a different VMM. It is still useful as a negative: it
+argues against "any over-read into a neighbouring page is fatal on L1VH", which
+would have surfaced broadly in perf work.
+
+## `mshv_root` unload experiment — INCONCLUSIVE
+
+Hypothesis under test: L1VH/MSHV memory donation makes the neighbouring page
+inaccessible, so removing `mshv_root` should stop the crashes with the kernel
+held constant.
+
+Design was A/B/A on `l7njd` (sender), identical load each time
+(`MITIGATE=false STREAMS=64 POLL=10`), `mshv_root` refcount 0 and no VMs on the
+node, so it unloaded cleanly:
+
+| Round | `mshv_root` | Duration | Geneve TX | Resets |
+|-------|-------------|---------:|----------:|-------:|
+| A  (22:03) | loaded   | 600 s  | –        | **3** |
+| B  (00:07) | unloaded | 600 s  | ~5.5 TB  | 0 |
+| B′ (00:18) | unloaded | 900 s  | ~8.2 TB  | 0 |
+| A′ (00:34) | reloaded | 600 s  | –        | **0** |
+
+**The control round A′ also produced zero resets, so the B result is not
+attributable to unloading `mshv_root`.** The experiment says nothing about the
+L1VH hypothesis, in either direction.
+
+What actually changed is the background state: both nodes entered a stable phase
+(`7rn6g` 23:33, `l7njd` 23:38) *before* the test started at 00:07 and stayed up
+for over an hour, spanning all three rounds. Earlier the same evening both nodes
+were resetting every few minutes with no synthetic load at all.
+
+This matches the historical spread — the 09-03 data has uptimes from **137 s to
+60,302 s** — so the crash rate is strongly boot- and time-dependent, and 10-15
+minute rounds are badly underpowered. Load alone does not determine the outcome:
+rounds B and B′ pushed ~13.7 TB through the Geneve path with zero crashes.
+
+Weak, non-conclusive observations recorded for completeness:
+
+- `MSHV_CREATE_PARTITION` ioctls: 7 in the last crashing boot vs 1 in the current
+  stable boot. Suggestive of partition churn correlating with instability, but
+  the boots differ in length and this is far from evidence.
+- The faulting physical addresses are spread widely — tens of MB to hundreds of
+  GB apart, within a boot and across boots. That argues **against** a small fixed
+  set of poisoned pages and weakens the simplest "one donated page" story.
+
+**Design lesson:** the A/B/A control is what caught this. A/B alone would have
+produced a confident and wrong "unloading `mshv_root` fixes it" claim. Any future
+attempt needs runs long enough to cover the observed variance, repetition across
+many boots, or a deterministic trigger.
+
+State was restored: `mshv_root` reloaded, `/dev/mshv` present, both nodes
+advertising `devices.kubevirt.io/mshv`, virt-handler Running on both, HCO
+Available, load namespace removed.
+
 ## Reproducer defects found and fixed
 
 The first run of the day reported `resets=0` **while the sender was actually
@@ -360,6 +454,13 @@ a red herring, and nothing here changes that.
 - [ ] Explain why a canonical direct-map read of `usable` RAM raises **#GP**.
 - [ ] Establish whether pages adjacent to the faulting buffers are donated to
       L1VH child partitions or otherwise removed from the root partition.
+      The `mshv_root` unload experiment was **inconclusive** (see above); redo it
+      with runs long enough to cover the 137 s–17 h variance, or find a
+      deterministic trigger first.
+- [ ] Explain the bimodal behaviour: both nodes reset every few minutes for hours,
+      then stay up for over an hour under ~13.7 TB of the exact load that
+      previously crashed them. Whatever gates the crash is boot-dependent and is
+      probably the shortest path to root cause.
 - [ ] Re-run the **mitigation** half with the fixed tooling and a durable
       offload-disable; the 09-03 mitigation result is not trustworthy.
 - [ ] Verify whether this kernel carries the CVE-2026-74705
