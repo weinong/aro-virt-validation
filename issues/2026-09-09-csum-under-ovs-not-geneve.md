@@ -195,6 +195,68 @@ guest-side mitigation has worked. It has not been confirmed, and confirming it
 needs host-side or hypervisor-level visibility that this cluster does not expose.
 It also does not explain why the exception is `#GP` rather than an intercept.
 
+## MINIMAL REPRODUCER: no OVS, no Geneve, no overlay, no physical NIC
+
+`scripts/19-mshv-veth-csum-stress.sh` removes the cluster network entirely. On a
+single node it creates a veth pair in a fresh network namespace, disables
+`tx-checksumming` on both ends so the sender must run
+`skb_checksum_help -> __skb_checksum -> csum_partial`, and drives bulk TCP with
+`socat`. Nothing in that path touches OVS, OVN, Geneve, CNI or the physical NIC.
+
+**It panics the node, reproducibly, at t=138 s in both runs.**
+
+The captured panic proves it is the same bug and that OVS is absent:
+
+```
+Oops: general protection fault, maybe for address 0xff110092c43afffc
+CPU: 27  Comm: socat            <- our own stress process
+RIP: 0010:csum_partial+0xe5/0x110
+
+csum_partial <- __skb_checksum <- skb_segment <- tcp_gso_segment
+  <- inet_gso_segment <- skb_mac_gso_segment <- __skb_gso_segment
+  <- validate_xmit_skb <- __dev_queue_xmit <- ip_finish_output2
+  <- ip_output <- __ip_queue_xmit <- __tcp_transmit_skb <- tcp_write_xmit
+  <- tcp_rcv_established <- tcp_v4_rcv <- ip_local_deliver
+```
+
+**No `ovs_*`, no `internal_dev_xmit`, no `geneve`, no `udp_tunnel` frame.**
+Same `csum_partial+0xe5`, same page-straddling fault address (offset `0xffc`).
+
+### What this settles
+
+- **OVS is not required.** It appeared in the first 11 traces only because on
+  OVN-Kubernetes essentially all traffic traverses it — the uplink is enslaved to
+  `br-ex`. Correlation, not causation, and this experiment separates them.
+- **Geneve/tunnelling is not required.** Already down to 8/11; now 0 needed.
+- **GSO segmentation is not required** (path 3 has none), and **the physical NIC
+  is not required** (veth only).
+- The **necessary and sufficient** ingredient is: the kernel computing a
+  **software checksum over skb payload** via `__skb_checksum` -> `csum_partial`.
+
+### Why this matters for reporting
+
+The bug can now be described without CNV, OpenShift, OVN, OVS or Azure
+networking: *on this L1VH kernel, bulk TCP over a veth pair with checksum offload
+disabled panics the guest*. That is a dramatically smaller reproducer for a
+kernel or hypervisor team, and it removes every component that previously
+muddied the report.
+
+It also explains why no guest-side network mitigation ever worked: the trigger is
+not a networking feature that can be turned off. Software checksumming is
+unavoidable whenever the device cannot offload it, and on this platform
+`tx-checksum-ip-generic` is `off [fixed]` on both the synthetic uplink and the
+MANA VF.
+
+### Caveats
+
+- Both reproductions were on the same node and kernel. **Not yet tested on a
+  non-L1VH machine**, which is the obvious next step to establish whether this is
+  platform-specific or a generic kernel bug.
+- Disabling `tx-checksumming` on a veth also forces TSO off, so the exact skb
+  shape differs from the OVS paths. The fault signature is nevertheless identical.
+- t=138 s twice is suggestive of a volume-driven threshold rather than chance,
+  but two samples cannot establish that.
+
 ## Still open
 
 - [ ] Why does a **canonical, mapped, live-readable** direct-map address raise
@@ -205,5 +267,10 @@ It also does not explain why the exception is `#GP` rather than an intercept.
 - [ ] Find a mitigation that covers path 3. Since the NIC cannot offload generic
       checksums (`off [fixed]`), software checksumming appears unavoidable on this
       platform, which makes a NIC/driver-level fix or a kernel fix necessary.
-- [ ] Report upstream with the corrected framing: **software `__skb_checksum` on
-      the OVS transmit path**, three call paths, page-straddling tail over-read.
+- [ ] Run `scripts/19-mshv-veth-csum-stress.sh` on a **non-L1VH** node to test
+      whether the minimal reproducer is platform-specific. This is now the single
+      most valuable outstanding experiment.
+- [ ] Report upstream using the **veth minimal reproducer**, not the OVS framing:
+      bulk TCP over a veth pair with `tx-checksumming` disabled panics this
+      kernel at `csum_partial+0xe5` on a page-straddling 8-byte tail over-read,
+      with the guest PTE present, writable and huge-page mapped.
