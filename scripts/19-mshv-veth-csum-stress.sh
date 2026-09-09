@@ -34,6 +34,7 @@ check_command oc || exit 1
 DURATION="${DURATION:-900}"
 STREAMS="${STREAMS:-32}"
 NS_NAME="${NS_NAME:-csumstress}"
+DISABLE_CSUM_OFFLOAD="${DISABLE_CSUM_OFFLOAD:-true}"
 POLL="${POLL:-10}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-30}"
 RUNS_DIR="${RUNS_DIR:-${_REPO_ROOT}/.checkup-runs/veth-csum-stress}"
@@ -70,6 +71,7 @@ remote_stress() {
   # name makes every later run collide and silently move zero bytes.
   local uniq="${run_id//[^0-9]/}"; uniq="${uniq: -6}"
   local ns="${NS_NAME}${uniq}" ifc="cs${uniq}"
+  local DISABLE_CSUM_OFFLOAD="${DISABLE_CSUM_OFFLOAD}"
   cat <<REMOTE
 set -u
 tel=${NODE_TELEMETRY}/${run_id}
@@ -79,7 +81,7 @@ TEL="\$tel/telemetry.tsv"
 durable() { dd of="\$TEL" oflag=append conv=notrunc,fsync status=none; }
 log() { printf '%s\n' "\$*" | durable; }
 
-log "# run_id=${run_id} streams=${STREAMS} duration=${DURATION}"
+log "# run_id=${run_id} streams=${STREAMS} duration=${DURATION} disable_csum_offload=${DISABLE_CSUM_OFFLOAD}"
 log "# netns=${ns} iface=${ifc}0"
 log "# node=\$(hostname) kernel=\$(uname -r) boot_id=\$(cat /proc/sys/kernel/random/boot_id)"
 log "# l1vh=\$(dmesg 2>/dev/null | grep -c 'running as L1VH partition') mshv_root=\$(grep -c '^mshv_root' /proc/modules)"
@@ -111,9 +113,12 @@ ip netns exec ${ns} ip addr add 10.244.240.2/30 dev ${ifc}1
 ip netns exec ${ns} ip link set ${ifc}1 up mtu 9000
 ip netns exec ${ns} ip link set lo up
 
-# Force SOFTWARE checksum on transmit.
-ethtool -K ${ifc}0 tx off rx off >/dev/null 2>&1 || true
-ip netns exec ${ns} ethtool -K ${ifc}1 tx off rx off >/dev/null 2>&1 || true
+# Force SOFTWARE checksum on transmit (DISABLE_CSUM_OFFLOAD=false skips this,
+# giving a control arm where no software checksum -- and so no over-read -- occurs).
+if [ "${DISABLE_CSUM_OFFLOAD}" = "true" ]; then
+  ethtool -K ${ifc}0 tx off rx off >/dev/null 2>&1 || true
+  ip netns exec ${ns} ethtool -K ${ifc}1 tx off rx off >/dev/null 2>&1 || true
+fi
 ethtool -k ${ifc}0 2>/dev/null | grep -E '^(tx-checksumming|rx-checksumming|generic-segmentation-offload|tcp-segmentation-offload)' \
   | while read -r l; do log "# offload \$l"; done
 

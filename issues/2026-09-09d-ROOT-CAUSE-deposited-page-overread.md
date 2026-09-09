@@ -47,6 +47,25 @@ fault 0xff110093911efffc  pfn=0x93911ef  next=0x93911f0  -> IN DEPOSITED RANGE
 A third fault from the preceding boot correlated the same way
 (`next_pfn=0x1df4d8`, `token=1895`, `withdrawn=False`).
 
+A **fourth** fault (boot `cd8ceab0`, kdump `2026-09-09-21:46:03`) correlated the
+same way — and this one was **not** from the stress harness. It was ordinary
+cluster traffic:
+
+```
+Comm: thanos          RIP: csum_partial+0xe5/0x110
+Oops: general protection fault, maybe for address 0xff11003119097ffa
+Call Trace: __skb_checksum+0x184/0x330 -> csum_partial+0xe5
+
+fault 0xff11003119097ffa  pfn=0x3119097  next=0x3119098 -> IN DEPOSITED RANGE
+    next_pfn=0x3119098 block [0x3119098-0x3119098] count=1 token=1189
+    partition=177  deposit_ret=0  withdrawn=False
+```
+
+That boot's deposits covered only **0.00241%** of RAM, so this single match had
+roughly 1-in-41,000 odds of being coincidental. It also demonstrates the defect
+is not an artifact of the reproducer: a stock OpenShift monitoring pod
+(Thanos) sending TCP over the pod network panicked the node.
+
 In every case the *faulting* page is ordinary kernel memory holding the network
 buffer; it is the **next** page — the one the over-read spills into — that is
 hypervisor-owned. `withdrawn=False` means the hypervisor had not returned it.
@@ -59,6 +78,27 @@ hypervisor-owned. `withdrawn=False` means the hypervisor had not returned it.
 | RAM pages | 195,821,568 |
 | P(one fault's next page is deposited) | 8.45 × 10⁻⁵ |
 | **P(3 of 3 by chance)** | **6.0 × 10⁻¹³** |
+
+Including the fourth fault (whose boot deposited only 4,715 pages,
+p = 2.41 × 10⁻⁵), **P(4 of 4 by chance) ≈ 1.5 × 10⁻¹⁷**.
+
+## The software checksum is the trigger — A/B on one node
+
+Both arms ran on the same node, same boot lineage, same 64-stream veth load,
+with the same **7,514 live deposited pages** present (deposited earlier in the
+boot, zero withdrawn, and zero new deposits during the control window — so the
+hazardous pages were present and stable for both arms). The only variable was
+whether the kernel had to walk the payload to compute a checksum:
+
+| arm | `tx-checksum` | data pushed | result |
+|---|---|---|---|
+| control | **on** (no software checksum) | **3,395 GiB** in 420 s | **no crash** |
+| positive | **off** (forces `__skb_checksum`) | — | **panic in ~4 s** |
+
+With offload on, the kernel never reads the payload, so the tail over-read never
+happens and 3,395 GiB — roughly a thousand times the volume that has previously
+been enough to crash this node — passes harmlessly. Flipping that one flag
+killed the node almost immediately. The over-read is necessary, not incidental.
 
 ## This explains every prior observation
 
@@ -91,7 +131,7 @@ not read the VM arms as a reliable on/off switch.
 
 ## What this is *not*
 
-- **Not** a use-after-free of returned pages. In all three hits the page was
+- **Not** a use-after-free of returned pages. In all four hits the page was
   still deposited (`withdrawn=False`), so this is not the "mishandled on return
   to Linux" variant of the theory. Guest-memory-path instrumentation
   (`mshv_map_user_memory` / `mshv_region_pin`) is **not** required to explain it.
@@ -99,6 +139,59 @@ not read the VM arms as a reliable on/off switch.
   checksums over page-frag payloads.
 - **Not** volume-driven: a non-L1VH node absorbed 8 TiB through the identical
   code path without a fault.
+
+## Why decade-old code only breaks here
+
+`csum_partial`'s tail over-read is ancient and has always been safe, because
+reading a few bytes past a buffer into the next page of your own RAM is
+harmless. Three conditions must hold simultaneously for it to become fatal, and
+this platform is the first place all three co-occur:
+
+**1. A neighbouring page must be revocable by someone else.** Only a *root
+partition* deposits pages to the hypervisor. A normal VM guest — including every
+ordinary Azure VM — never calls `HVCALL_DEPOSIT_MEMORY`, so no page in its
+address space can be hypervisor-owned. Linux-as-root-partition (L1VH/mshv) is
+new; this hazard simply cannot exist on the hardware where `csum_partial` was
+written and hardened.
+
+**2. The kernel must actually walk the payload in software.** Confirmed by the
+A/B above: with checksum offload on, 3,395 GiB passed cleanly. Azure forces the
+software path here — both NICs can only offload fixed IPv4/IPv6 checksums, never
+a Geneve inner checksum at an arbitrary offset:
+
+```
+enP30832s1 (mana)      tx-checksum-ip-generic: off [fixed]
+eth0       (hv_netvsc) tx-checksum-ip-generic: off [fixed]
+genev_sys_6081         tx-checksum-ip-generic: on     <- must be done in software
+```
+
+A bare-metal RHEL + QEMU/libvirt L1VH test has neither property: there is no
+overlay demanding an inner checksum, virtio-net hands frames over as
+`CHECKSUM_PARTIAL` without ever touching the bytes, and typical NICs advertise
+generic checksum offload. `__skb_checksum` over payload essentially never runs,
+so the over-read never happens and the bug is invisible no matter how long the
+test runs.
+
+**3. Deposited pages must be scattered next to hot network buffers.** They are,
+because deposits are overwhelmingly *single* pages taken from the buddy
+allocator — **5,980 of 6,073 blocks had `count=1`** — which land interleaved
+with everything else rather than in one isolated region. CNV keeps this churning:
+partitions are created and torn down constantly, in pairs, around VM lifecycle
+and node-labeller probing.
+
+```
+partition 152  56.3s ->   56.7s  ( 0.4s)     10 partitions in 18 minutes
+partition 153 248.4s ->  248.7s  ( 0.4s)     5.6 deposit blocks/s
+partition 154 249.4s ->  250.6s  ( 1.2s)     15.4 pages/s
+partition 155 282.4s ->  282.7s  ( 0.4s)     98% single-page deposits
+...
+partition 160 1131.4s -> 1132.7s ( 1.3s)  <- fault hit this partition's page 19s later
+```
+
+A bare QEMU test starts one long-lived partition and deposits once. Here the
+node continuously sprays single hypervisor-owned pages across memory adjacent to
+the very buffers being checksummed — which is why the same "harmless" over-read
+lands on a poisoned neighbour within seconds.
 
 ## Where the defect actually is
 
@@ -130,6 +223,14 @@ bash scripts/21-mshv-deposit-trace.sh install      # boot-time deposit ledger
 NODE=<mshv-node> DURATION=420 STREAMS=64 bash scripts/19-mshv-veth-csum-stress.sh run
 bash scripts/16-mshv-kdump.sh collect
 python3 scripts/22-correlate-fault-deposits.py <ledger>/trace.log <dump>/vmcore-dmesg.txt
+```
+
+To run the negative control that isolates the software checksum, keep offload on
+— the node should survive indefinitely:
+
+```sh
+NODE=<mshv-node> DURATION=420 STREAMS=64 DISABLE_CSUM_OFFLOAD=false \
+  bash scripts/19-mshv-veth-csum-stress.sh run
 ```
 
 The correlator refuses to compare a panic with a ledger from a different boot,
