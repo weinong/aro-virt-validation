@@ -53,6 +53,7 @@ STREAMS="${STREAMS:-64}"
 PORT="${PORT:-5001}"
 HOSTNET_PORT="${HOSTNET_PORT:-5301}"
 POLL="${POLL:-15}"
+WAIT_POOL_SECONDS="${WAIT_POOL_SECONDS:-1800}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-30}"
 DEBUG_TIMEOUT="${DEBUG_TIMEOUT:-240}"
 OFFLOAD_IFACES="${OFFLOAD_IFACES:-eth0 genev_sys_6081 br-ex ovn-k8s-mp0}"
@@ -169,15 +170,21 @@ YAML
 
 run_block() {
   local arm="$1" round="$2"
-  local nodes=(); mapfile -t nodes < <(mshv_nodes)
-  if [[ ${#nodes[@]} -lt 2 ]]; then
-    log_warn "need 2 mshv nodes, found ${#nodes[@]}; waiting"
-    sleep 60; return 0
-  fi
-  local server="${nodes[0]}" client="${nodes[1]}" n
-  for n in "${nodes[@]}"; do
-    node_ready "${n}" || { log_warn "${n} not Ready; waiting for the pool to settle"; sleep 90; return 0; }
+  # Wait for the pool rather than burning a block: nodes reboot constantly here,
+  # and a block run against a half-present pool measures nothing.
+  local nodes=() n waited=0
+  while :; do
+    mapfile -t nodes < <(mshv_nodes)
+    if [[ ${#nodes[@]} -ge 2 ]]; then
+      local all_ready=true
+      for n in "${nodes[@]}"; do node_ready "${n}" || all_ready=false; done
+      [[ "${all_ready}" == "true" ]] && break
+    fi
+    (( waited >= WAIT_POOL_SECONDS )) && { log_warn "pool still not ready after ${waited}s; skipping block"; return 0; }
+    (( waited % 120 == 0 )) && log_info "waiting for 2 Ready mshv nodes (${waited}s)..."
+    sleep 30; waited=$(( waited + 30 ))
   done
+  local server="${nodes[0]}" client="${nodes[1]}"
 
   # nogso must be (re-)applied every block: a reboot restores the defaults.
   local offload_before="n/a"

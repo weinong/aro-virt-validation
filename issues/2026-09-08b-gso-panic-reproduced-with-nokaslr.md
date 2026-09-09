@@ -301,6 +301,13 @@ and no Hyper-V intercept messages.
 
 ## Why only the Geneve path? (offload flags)
 
+> **SUPERSEDED by `issues/2026-09-09-csum-under-ovs-not-geneve.md`.** Eleven
+> locally-captured panics show Geneve appears in only 8/11 call chains, while
+> `__skb_checksum` and an OVS frame appear in 11/11. One path involves no tunnel
+> and no GSO at all. The offload-flag reasoning below is still correct about *why*
+> the guest must checksum in software; the "only Geneve" conclusion is not.
+
+
 `csum_partial` is called constantly, so the obvious objection is that this should
 crash everywhere. It does not, and the captured offload flags explain why.
 Verbatim `ethtool -k eth0` on `l7njd` (the MANA VF `enP30832s1` is identical):
