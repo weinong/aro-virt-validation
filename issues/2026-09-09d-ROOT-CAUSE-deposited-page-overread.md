@@ -60,6 +60,73 @@ to absorb becomes fatal.
 > the next word cannot succeed. Confirming this needs `arch/x86/mm/extable.c`,
 > which is not in `kernel-devel`.
 
+## Why `#GP` and not `#PF`?
+
+This is the question that makes the fixup fail, so it is worth answering
+precisely. The page-table walk captured at crash time, for the exact faulting
+address, settles it:
+
+```
+Translating virtual address ff11003119097ffa to physical address.
+  PGD : 6624888 => 7c01067        PUD : 7c02620 => 107119063
+  P4D : 7c01000 => 7c02067        PMD : 107119640 => 80000031190001e3
+VIRTUAL           PHYSICAL
+ff11003119097ffa  3119097ffa
+```
+
+`PMD = 0x80000031190001e3`: bit 0 **Present**, bit 1 **RW**, bit 7 **PS**, bit 63
+NX. The walk *terminates at the PMD* — this is a **2 MiB huge page** in the
+direct map, and it is present and writable.
+
+1. **Linux's own paging still maps the page, so the CPU cannot raise `#PF`.**
+   Linux donated the *physical* page to the hypervisor; it never unmapped it from
+   the direct map. The guest page walk succeeds. A `#PF` is architecturally
+   impossible here — there is nothing wrong with the guest's page tables.
+2. **The revocation lives one level below Linux.** Ownership was transferred at
+   the GPA/SLAT level. A second-level violation is reported by the CPU *to the
+   hypervisor*, not to the guest — the guest never sees an EPT/NPT fault.
+3. **So the hypervisor must synthesise something.** It cannot deliver a coherent
+   `#PF` (that would contradict the guest's own present PTE and require a CR2
+   the guest could act on), so Hyper-V injects a **`#GP(0)`**. The panic line
+   corroborates this: error code `0000`, meaning no segment selector is
+   involved, and the kernel prints "**maybe** for address", which it only does
+   when it has to *decode the instruction* to guess the address — i.e. the trap
+   delivered no fault address at all.
+4. **That is exactly what defeats the fixup.** `ex_handler_zeropad()` needs the
+   faulting address to confirm the access was the benign next-word case. `#GP`
+   supplies none, so the fixup cannot apply and the exception goes unhandled —
+   in IRQ context, that is an instant panic.
+
+In one line: **the page is revoked at a level Linux's page tables cannot
+express, so the failure arrives as the architecture's generic "illegal
+operation" fault rather than the page fault the kernel is prepared to absorb.**
+
+The 2 MiB huge page also constrains the fix. A single deposited 4 KiB page sits
+inside a 2 MiB direct-map mapping shared with 511 pages in ordinary use, so
+Linux cannot simply unmap the donated page without splitting the huge page.
+
+### Deposited pages are not uniformly revoked
+
+Reading live deposited pages through `/proc/kcore` (which zero-fills on fault —
+calibrated against known-unmapped vmalloc guard pages, which return all-zero
+with `errno=0`, never an error):
+
+| population | reads all-zero |
+|---|---|
+| known-unmapped vmalloc guard pages | 87% |
+| **live deposited, not withdrawn** | **65%** |
+| control PFNs (+1 GiB offset) | 17.5% |
+
+14 of 40 live deposited pages returned real non-zero data, so deposit does
+**not** immediately make a page inaccessible — consistent with the hypervisor
+revoking only the pages it actually commits to partition state, while the rest
+sit in the pool still readable. This matches the observed low spontaneous fault
+rate: only a subset of deposited pages are live hazards at any moment.
+
+> Caveat: `kcore`'s zero-fill makes "all-zero" ambiguous between *faulted* and
+> *genuinely zero*, so the 65% is an upper bound on inaccessibility, not a
+> measurement of it. The unambiguous half of the result is the 14 readable pages.
+
 ## The evidence
 
 Deposit tracepoints (instrumented `mgns1` kernel) streamed to disk from **boot**,
@@ -146,7 +213,7 @@ workload, which is why it is the one caught in all four panics.
 | 217/217 faults straddle a 4 KiB boundary | deposits are 4 KiB granular; only a straddling read reaches the next page |
 | Page tables show Present, Writable, huge-page mapped | the guest-side mapping is untouched; the hypervisor removed access *beneath* it |
 | `#GP`, not `#PF` | it is not a guest paging fault at all |
-| All 201,325,240 RAM pages readable on a live probe | the probe ran when those particular pages were not deposited |
+| All 201,325,240 RAM pages readable on a live probe | **misstatement** — that probe sampled one 8-byte read per 2 MiB (1 page in 512), so it never read most pages. Targeted reads of *known* deposited pages later showed 65% read as all-zero vs 17.5% of controls |
 | L1VH 4/4 crashes vs non-L1VH 0/3 with 8 TiB | only an L1VH root partition deposits pages to a hypervisor |
 | Reproduces with a bare veth pair, no OVS/Geneve/VM in the path | the network path only supplies a software checksum over page-frag data |
 | No guest-side mitigation ever worked | nothing in the guest can make a hypervisor-owned page readable |
@@ -296,9 +363,12 @@ buffer. Crucially, the kernel already has a contract for the second fact — the
 2. **Isolate deposited memory.** Allocate deposit pages so they are never
    adjacent to pages the kernel may over-read into — e.g. deposit at a coarser
    granularity, or from a reserved region. The current path hands over single
-   pages scattered throughout normal memory (98% `count=1`). Also effective, but
-   it only removes the adjacency; the underlying `#GP`-instead-of-`#PF`
-   contract violation would remain for any other route to a deposited page.
+   pages scattered throughout normal memory (98% `count=1`). Note the direct map
+   uses 2 MiB huge pages, so a donated 4 KiB page shares its mapping with 511
+   pages in ordinary use — meaning isolation realistically has to happen at
+   2 MiB granularity or from a region mapped at 4 KiB. Also effective, but it
+   only removes the adjacency; the underlying `#GP`-instead-of-`#PF` contract
+   violation would remain for any other route to a deposited page.
 3. **Extend the fixup to `#GP`.** Teach the zeropad handler to recover from a
    `#GP` with no fault address. Plausible but risky — `#GP` carries no address,
    so the handler cannot verify the fault was the benign next-word case, and
