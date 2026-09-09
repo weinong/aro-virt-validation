@@ -82,7 +82,7 @@ hypervisor-owned. `withdrawn=False` means the hypervisor had not returned it.
 Including the fourth fault (whose boot deposited only 4,715 pages,
 p = 2.41 × 10⁻⁵), **P(4 of 4 by chance) ≈ 1.5 × 10⁻¹⁷**.
 
-## The software checksum is the trigger — A/B on one node
+## The payload walk, not traffic volume, converts traffic into faults
 
 Both arms ran on the same node, same boot lineage, same 64-stream veth load,
 with the same **7,514 live deposited pages** present (deposited earlier in the
@@ -95,10 +95,14 @@ whether the kernel had to walk the payload to compute a checksum:
 | control | **on** (no software checksum) | **3,395 GiB** in 420 s | **no crash** |
 | positive | **off** (forces `__skb_checksum`) | — | **panic in ~4 s** |
 
-With offload on, the kernel never reads the payload, so the tail over-read never
-happens and 3,395 GiB — roughly a thousand times the volume that has previously
-been enough to crash this node — passes harmlessly. Flipping that one flag
-killed the node almost immediately. The over-read is necessary, not incidental.
+The control pushed *more* data than the arm that died, so volume is not the
+trigger. What matters is whether something walks the payload bytes: with offload
+on the kernel never reads them and 3.4 TiB passes harmlessly.
+
+This does **not** mean a software checksum is strictly required for the defect.
+Any kernel code that over-reads past a buffer into the adjacent page would fault
+identically. `csum_partial` is simply the highest-volume such reader in this
+workload, which is why it is the one caught in all four panics.
 
 ## This explains every prior observation
 
@@ -135,8 +139,11 @@ not read the VM arms as a reliable on/off switch.
   still deposited (`withdrawn=False`), so this is not the "mishandled on return
   to Linux" variant of the theory. Guest-memory-path instrumentation
   (`mshv_map_user_memory` / `mshv_region_pin`) is **not** required to explain it.
-- **Not** OVS, Geneve, CNV or MANA specific. Those merely generate software
-  checksums over page-frag payloads.
+- **Not** OVS, Geneve, CNV or MANA specific *as a mechanism*. Any code that
+  over-reads into an adjacent page would fault the same way. But on this
+  platform the OVN/OVS datapath is, by measurement, the sole producer of the
+  software checksums that do the over-reading — so it is the practical trigger
+  even though it is not the defect.
 - **Not** volume-driven: a non-L1VH node absorbed 8 TiB through the identical
   code path without a fault.
 
@@ -154,23 +161,39 @@ address space can be hypervisor-owned. Linux-as-root-partition (L1VH/mshv) is
 new; this hazard simply cannot exist on the hardware where `csum_partial` was
 written and hardened.
 
-**2. The kernel must actually walk the payload in software.** Confirmed by the
-A/B above: with checksum offload on, 3,395 GiB passed cleanly. Azure forces the
-software path here — both NICs can only offload fixed IPv4/IPv6 checksums, never
-a Geneve inner checksum at an arbitrary offset:
+**2. Something must walk the payload in software.** Measured with kprobes on the
+node, in a private ftrace instance (the global buffer is drained by the deposit
+tracer, which silently zeroed a first attempt):
+
+| condition | `skb_checksum_help` | `__skb_checksum` |
+|---|---|---|
+| ordinary cluster traffic, no synthetic load | 2.5/s | **12/s** |
+| veth stress with offload off (13.1 MB) | 3,115 | 23,461 (~7,800/s) |
+
+So ordinary OpenShift traffic on an idle-ish node runs a steady **trickle** of
+software checksums — not a flood. Every one of them, by stack trace, comes from
+the OVN datapath:
 
 ```
-enP30832s1 (mana)      tx-checksum-ip-generic: off [fixed]
-eth0       (hv_netvsc) tx-checksum-ip-generic: off [fixed]
-genev_sys_6081         tx-checksum-ip-generic: on     <- must be done in software
+ovs_dp_process_packet 72   ovs_vport_receive 59   ovs_execute_actions 41
+internal_dev_xmit     37   ovs_dp_upcall/queue_userspace_packet 31
 ```
 
-A bare-metal RHEL + QEMU/libvirt L1VH test has neither property: there is no
-overlay demanding an inner checksum, virtio-net hands frames over as
-`CHECKSUM_PARTIAL` without ever touching the bytes, and typical NICs advertise
-generic checksum offload. `__skb_checksum` over payload essentially never runs,
-so the over-read never happens and the bug is invisible no matter how long the
-test runs.
+Both physical NICs are `tx-checksum-ip-generic: off [fixed]` (`mana`,
+`hv_netvsc`), so they can offload only fixed-offset IPv4/IPv6 checksums, never
+one at the arbitrary offset an encapsulated packet needs. When OVS requires a
+materialized checksum — punting to `ovs-vswitchd`, or transmitting via an
+internal port — it therefore falls to software.
+
+That trickle is enough: at 12 walks/s a node dies in tens of minutes to hours,
+which matches the observed boot lifetimes and the spontaneous Thanos panic. The
+stress harness raises the rate ~650×, compressing time-to-crash from hours to
+seconds; it is an accelerant, not a different mechanism.
+
+A bare-metal RHEL + QEMU/libvirt L1VH test has no OVS datapath and no overlay
+demanding an inner checksum, and virtio-net hands frames over as
+`CHECKSUM_PARTIAL` without touching the bytes. It generates essentially none of
+these walks, so the bug stays invisible however long the test runs.
 
 **3. Deposited pages must be scattered next to hot network buffers.** They are,
 because deposits are overwhelmingly *single* pages taken from the buddy
