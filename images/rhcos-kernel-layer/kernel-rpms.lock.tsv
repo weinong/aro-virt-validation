@@ -7,12 +7,23 @@
 # before it enters the carrier image. RPM binaries are never committed; stage them
 # in KERNEL_RPM_DIR outside this repository.
 #
-# Current pin: Paolo Bonzini's L1VH test kernel for RHCOS 10 (el10_2), an UNSIGNED
-# developer build from https://bonzini.fedorapeople.org/kernel-l1vh/ . Because it
-# is unsigned, build the carrier with ALLOW_UNSIGNED_KERNEL_RPMS=true. RHCOS 10
-# installs all five of these subpackages, so all five are replaced together.
-kernel	0:6.12.0-211.49.1.1794_2798046552.el10_2	x86_64	ca965d8ee6516e9ebaac75d55e02c39c37bdf9a7defbb5473975a81b372d8c87
-kernel-core	0:6.12.0-211.49.1.1794_2798046552.el10_2	x86_64	71d77429e3b0401cdf4c60663d0bea7a93a2b04e7eaf9a6919d45918c904eeaa
-kernel-modules	0:6.12.0-211.49.1.1794_2798046552.el10_2	x86_64	22cd070f443998f120075fbed1d487fc6e2bd57f549eaf55925087b3c3d9ae03
-kernel-modules-core	0:6.12.0-211.49.1.1794_2798046552.el10_2	x86_64	baffee1b0b7902994671c638d1dc4b3665533608b15eca60fabba2b1b0d9227d
-kernel-modules-extra	0:6.12.0-211.49.1.1794_2798046552.el10_2	x86_64	e61802d5b5a10900cb54df8173d712b0453aff095fe9618af6093d18696bacc5
+# Current pin: INSTRUMENTED L1VH kernel `...mgns1.el10`, an UNSIGNED developer
+# build that adds logging around MSHV page donation to/from the hypervisor. It is
+# being used to test whether the csum_partial #GP (issues/2026-09-09b) lands on
+# memory that was donated to MSHV for a VM and then mishandled when returned to
+# the Linux kernel on teardown.
+#
+# Note the release suffix differs from the previous pin: `mgns1.el10` here versus
+# `el10_2` before, same 6.12.0-211.49.1.1794_2798046552 base. EXPECTED_KERNEL in
+# l1vh.env must match, or scripts/12b will report the swap as failed.
+#
+# RHCOS 10 installs all five of these subpackages, so all five are replaced
+# together. The tarball also ships kernel-devel, kernel-devel-matched,
+# kernel-modules-extra-matched, kernel-modules-internal and
+# kernel-modules-partner; those are NOT installed on RHCOS and are deliberately
+# left out of the carrier.
+kernel	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	b358a6b887102d1be5b2a09f85c4970deb69672749eeec6756afe04a263bfd5d
+kernel-core	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	d6bf320a34be7f596e1a11c05067cc57e8c53b5d3d9532be565c52caa8470c4b
+kernel-modules	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	52ad96322f8368e3a557f42bc66ca9ae5d3ee6d3f9c03799fe83f84f7a94eea9
+kernel-modules-core	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	8feadd411bbdd4a137207301ef941db62e96c479722cecf2033e863e9cbcca00
+kernel-modules-extra	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	f1029e6c33b072a7b53bddfc6b233f0b5d3c0f99e8176017ceda4756f128415c
