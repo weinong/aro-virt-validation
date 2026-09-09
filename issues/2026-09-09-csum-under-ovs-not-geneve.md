@@ -139,6 +139,62 @@ itself lives in OVS.
   was disabled. That MHC replaces these nodes under sustained panics is itself
   worth noting for production: the failure is disruptive beyond the reboot.
 
+## The page tables were VALID at fault time
+
+`makedumpfile --non-mmap --vtop <addr> /proc/vmcore <scratch>` walks the crashed
+kernel's page tables for a single address. It runs in the crash kernel *before*
+the full dump, so it still produces an answer when the dump later aborts. Nine
+panics produced a successful walk:
+
+| timestamp | fault vaddr | level | entry | P | RW | PS | offset in huge page |
+|---|---|---|---|---|---|---|---|
+| 06:00:15 | `0xff1100025d6cffff` | PMD | `0x800000025d6001e3` | 1 | 1 | 1 | 851967 / 2 MiB |
+| 07:17:15 | `0xff1100920fce7fff` | PUD | `0x80000092000001e3` | 1 | 1 | 1 | 265191423 / 1 GiB |
+| 04:22:50 | `0xff110032ce247ffd` | PUD | `0x80000032c00001e3` | 1 | 1 | 1 | 237273085 / 1 GiB |
+| 04:56:06 | `0xff110062129f7ffc` | PMD | `0x80000062128001e3` | 1 | 1 | 1 | 2064380 / 2 MiB |
+| 04:59:26 | `0xff11006248e7fffc` | PUD | `0x80000062400001e3` | 1 | 1 | 1 | 149422076 / 1 GiB |
+| 05:02:40 | `0xff110091970ffffc` | PMD | `0x80000091970001e3` | 1 | 1 | 1 | 1048572 / 2 MiB |
+| 06:03:22 | `0xff1100920fb07ffc` | PMD | `0x800000920fa001e3` | 1 | 1 | 1 | 1081340 / 2 MiB |
+| 07:13:50 | `0xff11006215d3fffa` | PMD | `0x8000006215c001e3` | 1 | 1 | 1 | 1310714 / 2 MiB |
+| 07:21:02 | `0xff110001cc077ffc` | PUD | `0x80000001c00001e3` | 1 | 1 | 1 | 201818108 / 1 GiB |
+
+**Every fault address was Present, Writable, and mapped by a huge page**
+(`0x1e3` = P|RW|A|D|PS, plus NX). Translation succeeded in all nine cases.
+
+### This eliminates the guest's paging state as the cause
+
+Three consequences, all measured rather than inferred:
+
+1. **The faulting address was mapped and valid.** A `#GP` cannot be blamed on an
+   absent or malformed guest PTE.
+2. **The direct map here uses 2 MiB and 1 GiB huge pages.** A single entry covers
+   the whole region, so the neighbouring 4 KiB the tail over-read touches is
+   mapped *by the same entry*. The "over-read steps into an unmapped page" theory
+   is therefore **dead**: within a huge page there is nothing to step into.
+3. **No fault landed in the last 4 KiB of its huge page** (0/9), so the over-read
+   never crossed a huge-page (or page-table) boundary either.
+
+Combined with the earlier `/proc/kcore` probe — all 201,325,240 pages of System
+RAM readable on a live kernel — the guest kernel's memory management is
+exonerated.
+
+### The remaining coherent hypothesis
+
+The 4 KiB boundary is meaningless to the guest's page tables here (huge pages),
+yet **217/217 faults straddle a 4 KiB boundary**. Something is enforcing 4 KiB
+granularity, and it is not the guest.
+
+That points at the hypervisor's second-level address translation, which *is*
+4 KiB granular: the guest reads 8 bytes crossing into the next 4 KiB frame, that
+frame is not currently backed in the L1VH/MSHV stage-2 mapping, and the resulting
+fault surfaces in the guest as `#GP`.
+
+**This is a hypothesis, not a measurement.** It explains the 4 KiB straddle, the
+valid guest PTEs, the canonical addresses, the live readability, and why no
+guest-side mitigation has worked. It has not been confirmed, and confirming it
+needs host-side or hypervisor-level visibility that this cluster does not expose.
+It also does not explain why the exception is `#GP` rather than an intercept.
+
 ## Still open
 
 - [ ] Why does a **canonical, mapped, live-readable** direct-map address raise
