@@ -39,6 +39,7 @@ BUF_KB="${BUF_KB:-1024}"
 SNAP_SECONDS="${SNAP_SECONDS:-3}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-30}"
 TRACE_DIR="/var/log/mshv-deposit"
+TRACE_MC_NAME="${TRACE_MC_NAME:-99-mshv-deposit-trace}"
 OUT_DIR="${OUT_DIR:-${_REPO_ROOT}/.checkup-runs/mshv-deposit-trace}"
 
 oc_() { oc --request-timeout="${REQUEST_TIMEOUT}s" "$@"; }
@@ -81,6 +82,93 @@ while True:
             pass
     time.sleep(interval)
 PY
+}
+
+# Boot-time tracing: the ONLY way a "not donated" answer means anything.
+# Enabling tracepoints by hand leaves everything before that point invisible, so
+# a fault on a page deposited during early boot looks identical to a fault on a
+# page never deposited at all.
+cmd_install() {
+  local mcp="${MSHV_MCP_NAME:-mshv}"
+  local script_b64 unit_b64
+  script_b64="$(base64 -w0 "${_REPO_ROOT}/images/mshv-deposit-trace/mshv-trace-stream.py")"
+  unit_b64="$(base64 -w0 <<'UNIT'
+[Unit]
+Description=Stream MSHV deposit/withdraw tracepoints to disk
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+ConditionPathExists=/sys/kernel/tracing/events/mshv_deposit
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/mshv-trace-stream.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=sysinit.target
+UNIT
+)"
+
+  log_warn "Installing boot-time MSHV deposit tracing on the ${mcp} pool: nodes will reboot."
+  oc_ apply -f - <<EOF
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: ${TRACE_MC_NAME}
+  labels:
+    machineconfiguration.openshift.io/role: ${mcp}
+spec:
+  config:
+    ignition:
+      version: 3.4.0
+    storage:
+      files:
+        - path: /usr/local/bin/mshv-trace-stream.py
+          mode: 0755
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,${script_b64}"
+    systemd:
+      units:
+        - name: mshv-trace-stream.service
+          enabled: true
+          contents: |
+$(base64 -d <<< "${unit_b64}" | sed 's/^/            /')
+  kernelArguments:
+    - trace_event=mshv_deposit:hv_deposit_pages_block,mshv_deposit:hv_deposit_pages_done,mshv_deposit:hv_withdraw_pages
+    - trace_buf_size=4M
+EOF
+  log_info "Waiting for the ${mcp} pool to roll out..."
+  sleep 30
+  oc_ wait "mcp/${mcp}" --for=condition=Updated=True --timeout=45m
+  log_ok "boot-time tracing installed"
+  cmd_verify_ledger
+}
+
+cmd_uninstall() {
+  local mcp="${MSHV_MCP_NAME:-mshv}"
+  oc_ delete mc "${TRACE_MC_NAME}" --ignore-not-found
+  sleep 30
+  oc_ wait "mcp/${mcp}" --for=condition=Updated=True --timeout=45m
+  log_ok "boot-time tracing removed"
+}
+
+# A ledger is only usable if it began early enough to have seen everything.
+cmd_verify_ledger() {
+  local node; node="$(pick_node)"
+  on_node "${node}" '
+    d=$(ls -1dt /var/log/mshv-deposit/boot-*/ 2>/dev/null | head -1)
+    if [ -z "$d" ]; then echo "NO LEDGER"; exit 1; fi
+    echo "ledger=$d"
+    grep -E "^(boot_id|started_uptime|events_present)" "$d/meta.txt" 2>/dev/null
+    echo "cmdline_trace_event=$(grep -c trace_event=mshv_deposit /proc/cmdline)"
+    echo "unit=$(systemctl is-active mshv-trace-stream.service 2>/dev/null)"
+    echo "current_uptime=$(cut -d\  -f1 /proc/uptime)"
+    echo "events=$(grep -c hv_deposit_pages_block "$d/trace.log" 2>/dev/null || echo 0)"
+    echo "withdraws=$(grep -c hv_withdraw_pages "$d/trace.log" 2>/dev/null || echo 0)"
+    echo "lost_events=$(grep -c LOST "$d/trace.log" 2>/dev/null || echo 0)"' | sed 's/^/  /'
 }
 
 cmd_start() {
@@ -169,9 +257,12 @@ cmd_stop() {
 }
 
 case "${1:-status}" in
+  install)   cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  ledger)    cmd_verify_ledger ;;
   start)  shift; cmd_start "${1:-}" ;;
   status) cmd_status ;;
   fetch)  cmd_fetch ;;
   stop)   cmd_stop ;;
-  *) log_error "Unknown action '${1}'. Use: start|status|fetch|stop"; exit 1 ;;
+  *) log_error "Unknown action '${1}'. Use: install|ledger|start|status|fetch|stop|uninstall"; exit 1 ;;
 esac

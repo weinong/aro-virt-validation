@@ -19,6 +19,7 @@ Usage:
   python3 scripts/22-correlate-fault-deposits.py TRACE.log DMESG [DMESG...]
   python3 scripts/22-correlate-fault-deposits.py --self-test
 """
+import os
 import re
 import sys
 
@@ -78,6 +79,34 @@ def parse_faults(text):
     return [int(a, 16) for a in FAULT_RE.findall(text)]
 
 
+def boot_match(meta, panic_uptime, dump_name, trace_lo):
+    """Decide whether a panic and a ledger come from the same boot.
+
+    Preferred: compare boot-start wall times. The ledger records when it began
+    and how far into the boot that was; the dump directory name carries the wall
+    time of the crash and the dmesg carries the uptime at panic. Both yield a
+    boot start, which must agree.
+
+    Do NOT use the last trace timestamp as the ledger's end: deposits stop
+    during a quiet period, so an idle ledger looks identical to a dead one.
+    """
+    started_wall = meta.get("started_wall")
+    started_up = meta.get("started_uptime")
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})-(\d{2}):(\d{2}):(\d{2})", dump_name)
+    if started_wall and started_up and m:
+        import calendar, datetime
+        dump_epoch = calendar.timegm(datetime.datetime(
+            *[int(g) for g in m.groups()]).timetuple())
+        ledger_boot = float(started_wall) - float(started_up)
+        panic_boot = dump_epoch - panic_uptime
+        delta = abs(ledger_boot - panic_boot)
+        return ("YES" if delta < 180 else "NO"), f"boot-start delta {delta:.0f}s"
+    # Fallback: we can only assert the ledger had started before the panic.
+    if panic_uptime >= trace_lo:
+        return "LIKELY", "no wall clock in ledger; only a lower bound checked"
+    return "NO", "panic predates the ledger's first event"
+
+
 def classify(fault_va, blocks, done, withdrawn):
     """Where does this faulting address sit relative to deposited memory?"""
     pfn = (fault_va - PAGE_OFFSET_5L) >> PAGE_SHIFT
@@ -106,6 +135,7 @@ def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     trace_path, dmesg_paths = sys.argv[1], sys.argv[2:]
+    global complete
 
     blocks, done, withdrawn = parse_trace(open(trace_path, errors="replace").read())
     dep_pages = sum(b["count"] for b in blocks)
@@ -116,10 +146,28 @@ def main():
         print("\n!! no deposit events in the trace: either no VM activity occurred,")
         print("   or tracing was not running. Correlation below is meaningless.")
 
-    # A null result is only meaningful if the trace could plausibly have covered
-    # the faulting pages. HVCALL_DEPOSIT_MEMORY carries the hypervisor's own
-    # bookkeeping pages, not guest RAM, so coverage is normally minuscule and
-    # "no overlap" is the expected outcome either way.
+    # What decides whether a null result means anything is COMPLETENESS, not
+    # coverage: if the ledger began at boot and lost no events, then a page that
+    # never appears in it was genuinely never deposited this boot, and a
+    # non-match refutes the deposit path outright. Probability only mattered
+    # while the ledger had a hole in it.
+    meta = {}
+    meta_path = os.path.join(os.path.dirname(os.path.abspath(trace_path)), "meta.txt")
+    if os.path.exists(meta_path):
+        for line in open(meta_path, errors="replace"):
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                meta[k] = v
+    # Kernel timestamps in the trace bound the boot the ledger belongs to.
+    trace_text = open(trace_path, errors="replace").read()
+    tstamps = [float(x) for x in re.findall(r"\s(\d+\.\d{6}):\s", trace_text)]
+    trace_span = (min(tstamps), max(tstamps)) if tstamps else None
+    started = meta.get("started_uptime")
+    lost = "LOST" in open(trace_path, errors="replace").read()
+    complete = started is not None and float(started) < 60 and not lost
+    print(f"ledger started at uptime: {started or 'unknown'}s   lost events: {lost}")
+    print(f"LEDGER COMPLETE FROM BOOT: {'YES' if complete else 'NO'}")
+
     covered = set()
     for b in blocks:
         covered.update(range(b["base_pfn"], b["base_pfn"] + b["count"]))
@@ -131,6 +179,20 @@ def main():
     total = matched = 0
     for path in dmesg_paths:
         faults = parse_faults(open(path, errors="replace").read())
+        # Refuse to compare a panic against a ledger from a DIFFERENT boot.
+        # Uptimes restart at 0, so a mismatched pair silently produces a
+        # meaningless "not in any deposited range".
+        dtext = open(path, errors="replace").read()
+        ups = [float(x) for x in re.findall(r"^\[\s*(\d+\.\d+)\]", dtext, re.M)]
+        panic_up = max(ups) if ups else None
+        if trace_span and panic_up is not None:
+            lo, hi = trace_span
+            dumpname = os.path.basename(os.path.dirname(path))
+            verdict, detail = boot_match(meta, panic_up, dumpname, lo)
+            print(f"\n[{dumpname}] panic uptime={panic_up:.1f}s  same boot: {verdict}  ({detail})")
+            if verdict == "NO":
+                print("  SKIPPED: ledger is from a different boot; any result would be meaningless.")
+                continue
         for fv in faults:
             total += 1
             pfn, next_pfn, hits = classify(fv, blocks, done, withdrawn)
@@ -147,8 +209,14 @@ def main():
 
     print(f"\nfaults examined: {total}   inside a deposited range: {matched}")
     expected = total * frac
-    print(f"overlap expected by chance: {expected:.6f} pages")
-    if total and not matched:
+    if total and not matched and complete:
+        print("\n>> VERDICT: the ledger is complete from boot and lost no events,")
+        print("   so these pages were NEVER deposited to the hypervisor this boot.")
+        print("   If no guest VM ran this boot either, then neither donation path")
+        print("   touched them, and the donation theory does not explain this fault.")
+        print("   Caveat: hypervisor-side ownership could in principle survive a")
+        print("   guest reboot, which this test cannot see.")
+    elif total and not matched:
         if expected < 0.05:
             print(f"\n!! VERDICT: this null result is NOT evidence against the hypothesis.")
             print(f"   With {100*frac:.5f}% coverage, zero overlap is the expected outcome")
