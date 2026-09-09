@@ -1,5 +1,12 @@
 # 2026-09-09 — The trigger is software checksumming under OVS, not Geneve
 
+> **ROOT CAUSE FOUND — see `issues/2026-09-09d-ROOT-CAUSE-deposited-page-overread.md`.**
+> The `#GP` is `csum_partial`'s 8-byte tail over-read crossing a 4 KiB page
+> boundary into a page deposited to the hypervisor via `HVCALL_DEPOSIT_MEMORY`
+> and still owned by it. Confirmed 3/3 against a complete-from-boot deposit
+> ledger (p ~ 6e-13 by chance).
+
+
 > **TL;DR:** Eleven real panics were captured **locally via kdump** (no serial
 > console needed) and their call chains disprove the "Geneve/tunnel" framing.
 > The invariants across all eleven are `csum_partial`, `__skb_checksum`, and an

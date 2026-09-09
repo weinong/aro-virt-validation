@@ -1,5 +1,12 @@
 # 2026-09-09 — Instrumented kernel deployed; deposit tracing cannot test the hypothesis
 
+> **ROOT CAUSE FOUND — see `issues/2026-09-09d-ROOT-CAUSE-deposited-page-overread.md`.**
+> The `#GP` is `csum_partial`'s 8-byte tail over-read crossing a 4 KiB page
+> boundary into a page deposited to the hypervisor via `HVCALL_DEPOSIT_MEMORY`
+> and still owned by it. Confirmed 3/3 against a complete-from-boot deposit
+> ledger (p ~ 6e-13 by chance).
+
+
 > **TL;DR:** The instrumented kernel (`...mgns1.el10`) is deployed on the `mshv`
 > pool and its three `mshv_deposit` tracepoints work. The panic was reproduced
 > with tracing live, and the faulting pages do **not** fall in any deposited

@@ -1,5 +1,12 @@
 # 2026-09-09 — Matched-pair test: the panic is L1VH-specific, not kernel-specific
 
+> **ROOT CAUSE FOUND — see `issues/2026-09-09d-ROOT-CAUSE-deposited-page-overread.md`.**
+> The `#GP` is `csum_partial`'s 8-byte tail over-read crossing a 4 KiB page
+> boundary into a page deposited to the hypervisor via `HVCALL_DEPOSIT_MEMORY`
+> and still owned by it. Confirmed 3/3 against a complete-from-boot deposit
+> ledger (p ~ 6e-13 by chance).
+
+
 > **TL;DR:** With a **single variable changed** — the Azure L1VH host-feature tag —
 > the same kernel, same VM size and same MachineConfig either panics within
 > minutes or survives indefinitely. L1VH nodes crashed **4/4 runs**, the fastest
