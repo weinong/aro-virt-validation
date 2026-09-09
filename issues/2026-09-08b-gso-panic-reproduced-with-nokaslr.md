@@ -445,17 +445,13 @@ Checks done on that address:
 - The failing address **moves between crashes**: `0x108c90000` (~4.1 GiB) on one,
   `0x610a8b0000` (~388 GiB) on the next. It is not one fixed poisoned page.
 
-### Why this matters
+### What I initially concluded, and why it was wrong
 
-This is a **network-independent, deterministic demonstration that some pages of
-ordinary System RAM are inaccessible on this host**. No skb, no Geneve, no OVS,
-no `csum_partial` — just a sequential read of physical memory that faults.
-
-That is precisely the condition needed to explain the panic: `csum_partial`'s
-tail over-read steps into the next page, and on this host the next page can be
-inaccessible. It reframes the defect — the networking path is the **exposure**
-(the only high-volume producer of software checksums over page frags), not the
-cause.
+I first read this as a network-independent demonstration that pages of ordinary
+System RAM are inaccessible on this host, which would have neatly explained the
+`#GP`. **A follow-up probe on the running kernel disproved that** — see the
+retraction immediately below. Keeping the reasoning here because the failure mode
+is still real and still blocks vmcore capture; only the interpretation changed.
 
 ### Caveats — this is not yet proof
 
@@ -484,16 +480,70 @@ cause.
 
 ### Next steps from here
 
-- [ ] Test whether the same physical page is readable from a **running** kernel
-      (e.g. `/proc/kcore` at `PAGE_OFFSET + phys`, which `nokaslr` makes
-      computable). That distinguishes a `/proc/vmcore` mapping artifact from real
-      platform-level inaccessibility.
+- [x] Test whether the direct map is readable from a **running** kernel. **Done**
+      — all 201,325,240 pages readable on both nodes; see the retraction above.
 - [ ] Determine whether the unreadable pages correspond to memory the hypervisor
       has taken (mshv deposit / child-partition donation).
 - [ ] Get a usable vmcore despite the bad page: a `makedumpfile` build that skips
       read errors, or a dump restricted to a known-good range.
-- [ ] Repeat on a non-L1VH node to see whether unreadable System RAM is unique to
-      this platform.
+- [ ] Give the kcore probe a **positive control** so a negative result can be
+      trusted: construct a known-inaccessible mapped page and confirm the probe
+      reports it.
+- [ ] Chase *transient* inaccessibility, which the snapshot scans cannot exclude:
+      correlate faults with child-partition memory donation/reclaim.
+- [ ] Explain `#GP` rather than `#PF`; no current hypothesis does this cleanly.
+
+### RETRACTED: the live direct map is fully readable
+
+**The "network-independent reproducer" claim above is wrong and is retracted.**
+
+`scripts/17-kcore-directmap-probe.py` reads 8 bytes from every 4 KiB page of
+System RAM through `/proc/kcore` at `PAGE_OFFSET + phys` (computable only because
+`nokaslr` fixes `PAGE_OFFSET`). Run on a **normally running** kernel:
+
+| node | VMs running | pages probed | read failures | node rebooted |
+|---|---|---:|---:|---|
+| `l7njd` | none | 201,325,240 | **0** | no |
+| `7rn6g` | 2 (`vm-pool-fedora-0`, `probe`) | 201,325,240 | **0** | no |
+
+Every page of all 768 GiB is readable on both nodes, including the one hosting
+L1VH child partitions. There is **no persistent set of inaccessible System RAM
+pages**, so that cannot be the explanation for the `#GP`.
+
+The `makedumpfile` EFAULT is therefore most likely an artifact of the **crash
+kernel's** `/proc/vmcore` old-memory mapping, not a property of the hardware or
+hypervisor. The fact that the failing address **moved between crashes**
+(`0x108c90000`, then `0x610a8b0000`) fits a transient mapping/resource failure in
+the constrained crash kernel far better than it fits specific bad pages.
+
+**Methodological caveat, stated plainly:** this probe has **no positive control**.
+I did not demonstrate that it *can* detect a mapped-but-inaccessible page. If
+`/proc/kcore` reads that region via `copy_from_kernel_nofault`, a fault surfaces
+as `EFAULT` and would have been counted; if instead it silently zero-fills, the
+probe would report success regardless. "0 failures" is therefore weaker evidence
+than the raw number suggests, though the absence of any panic across 402 million
+reads is meaningful on its own.
+
+**Also note this is a snapshot.** Each scan took ~4 minutes. A page that is
+inaccessible only *transiently* — for example while being donated to or reclaimed
+from a child partition — would very likely be missed.
+
+### Where that leaves the `#GP`
+
+Eliminated: the faulting address is canonical (5-level paging), inside `usable`
+e820 System RAM, and demonstrably readable on a running kernel. So the panic is
+**not** explained by a permanently inaccessible or invalid page.
+
+What survives:
+
+- **Transient inaccessibility** at the moment of the fault — now the leading
+  hypothesis, and specifically not excluded by the scans above.
+- **A corrupt skb length** (the CVE-2026-74705 direction), with the walk running
+  somewhere that faults. This is weakened by the fact that all System RAM reads
+  fine, but not eliminated.
+
+Both still have to explain why the fault is `#GP` rather than `#PF`, which no
+current hypothesis does cleanly.
 
 ## Reproducer defects found and fixed
 
