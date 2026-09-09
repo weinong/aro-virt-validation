@@ -120,6 +120,29 @@ Partial results:
 Designing an arm that genuinely avoids OVS is difficult here, because the uplink
 itself lives in OVS.
 
+## Cluster state left behind (READ THIS FIRST)
+
+Two deliberate changes are **still in effect** and must be reverted before this
+cluster is used to judge normal ARO behaviour:
+
+1. **MachineHealthCheck is disabled.** Nodes now reboot in place instead of being
+   replaced. Revert with:
+   ```sh
+   oc patch cluster.aro.openshift.io cluster --type=merge \
+     -p '{"spec":{"operatorflags":{"aro.machinehealthcheck.enabled":"true","aro.machinehealthcheck.managed":"true"}}}'
+   ```
+   The ARO operator will then recreate `aro-machinehealthcheck`.
+2. **kdump is enabled on the `mshv` pool** with an 8 GiB `crashkernel`
+   reservation, `kexec_load`, and a wrapper collector. Remove with
+   `make mshv-kdump-disable` (reboots the pool).
+
+Also present: a scaled-up non-L1VH worker
+(`machineset aro-virt-test-8gpzs-worker-centralus1`, 1 replica) kept for
+comparison testing. Scale to 0 when finished.
+
+Load namespaces and the veth/netns stress artefacts have been removed, and both
+nodes were Ready at handover.
+
 ## Interventions during this work
 
 - **MachineHealthCheck was disabled** so crashing nodes reboot in place instead of
