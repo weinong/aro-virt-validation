@@ -65,7 +65,7 @@ def read_telemetry(path):
 
 
 def first_reset(poll):
-    """Elapsed seconds at the first observed boot-ID change."""
+    """Elapsed seconds at the first observed boot-ID change (confirmed reboot)."""
     base = None
     for r in poll:
         if r["boot"] in ("unknown", ""):
@@ -77,6 +77,25 @@ def first_reset(poll):
     return None
 
 
+def first_unresponsive(poll):
+    """Elapsed seconds when the node stopped reporting Ready and never recovered.
+
+    A panic does NOT always show up as a boot-ID change within the window: with
+    kdump enabled the crash kernel can spend minutes writing a dump, during
+    which the node is simply unresponsive and the boot ID is unchanged. Treating
+    only reboots as crashes silently scores those runs as survivals.
+    """
+    seen_ready = False
+    for i, r in enumerate(poll):
+        if r["ready"] == "True":
+            seen_ready = True
+            continue
+        if seen_ready and r["ready"] in ("Unknown", "False"):
+            if all(x["ready"] != "True" for x in poll[i:]):
+                return int(r["elapsed"])
+    return None
+
+
 def analyse(run_dir):
     meta = read_kv(os.path.join(run_dir, "meta.tsv"))
     facts = read_kv(os.path.join(run_dir, "node-facts.tsv"))
@@ -84,13 +103,18 @@ def analyse(run_dir):
     comments, samples = read_telemetry(os.path.join(run_dir, "telemetry.tsv"))
 
     reset_at = first_reset(poll)
+    down_at = first_unresponsive(poll)
+    # Either signal means the node died; prefer whichever was observed first.
+    crash_at = min([x for x in (reset_at, down_at) if x is not None], default=None)
+    crash_kind = ("reboot" if crash_at == reset_at and reset_at is not None
+                  else ("unresponsive" if crash_at is not None else "-"))
     # Bytes actually pushed before the node died, from the on-node record.
     peak_bytes = max((s[1] for s in samples), default=None)
     peak_pkts = max((s[2] for s in samples), default=None)
     last_uptime = max((s[0] for s in samples), default=None)
 
     bytes_at_reset = None
-    if reset_at is not None and samples:
+    if crash_at is not None and samples:
         # telemetry uptime is node uptime; align via the recorded load start.
         start_uptime = None
         for c in comments:
@@ -100,7 +124,7 @@ def analyse(run_dir):
                 except ValueError:
                     pass
         if start_uptime is not None:
-            cand = [b for (u, b, _) in samples if u - start_uptime <= reset_at]
+            cand = [b for (u, b, _) in samples if u - start_uptime <= crash_at]
             bytes_at_reset = max(cand, default=None)
         else:
             bytes_at_reset = peak_bytes
@@ -113,7 +137,8 @@ def analyse(run_dir):
         "kernel": facts.get("kernel", "?"),
         "l1vh": facts.get("l1vh", "?"),
         "mshv_root": facts.get("mshv_root", "?"),
-        "reset_at": reset_at,
+        "reset_at": crash_at,
+        "crash_kind": crash_kind,
         "samples": len(samples),
         "peak_bytes": peak_bytes,
         "peak_pkts": peak_pkts,
@@ -141,13 +166,15 @@ def main():
 
     rows = [analyse(d) for d in dirs]
 
-    hdr = f"{'run_id':<34}{'l1vh':>5}{'strm':>5}{'dur':>6}{'reset@s':>9}{'GiB@reset':>11}{'peakGiB':>9}{'samples':>9}"
+    hdr = (f"{'run_id':<34}{'l1vh':>5}{'strm':>5}{'dur':>6}{'crash@s':>9}"
+           f"{'kind':>14}{'GiB@crash':>11}{'peakGiB':>9}{'samples':>8}")
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         print(f"{r['run_id']:<34}{r['l1vh']:>5}{r['streams']:>5}{r['duration']:>6}"
               f"{(r['reset_at'] if r['reset_at'] is not None else '-'):>9}"
-              f"{gib(r['bytes_at_reset']):>11}{gib(r['peak_bytes']):>9}{r['samples']:>9}")
+              f"{r['crash_kind']:>14}"
+              f"{gib(r['bytes_at_reset']):>11}{gib(r['peak_bytes']):>9}{r['samples']:>8}")
 
     print("\n--- volume hypothesis ---")
     crashed = [r for r in rows if r["reset_at"] is not None and r["bytes_at_reset"]]

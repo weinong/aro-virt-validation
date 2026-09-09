@@ -69,9 +69,10 @@ remote_stress() {
 set -u
 tel=${NODE_TELEMETRY}/${run_id}
 mkdir -p "\$tel"
-exec 3>"\$tel/telemetry.tsv"
-
-log() { printf '%s\n' "\$*" >&3; sync; }
+TEL="\$tel/telemetry.tsv"
+: > "\$TEL"
+durable() { dd of="\$TEL" oflag=append conv=notrunc,fsync status=none; }
+log() { printf '%s\n' "\$*" | durable; }
 
 log "# run_id=${run_id} streams=${STREAMS} duration=${DURATION}"
 log "# node=\$(hostname) kernel=\$(uname -r) boot_id=\$(cat /proc/sys/kernel/random/boot_id)"
@@ -104,8 +105,7 @@ sleep 2
     printf 'SAMPLE\t%s\t%s\t%s\n' \
       "\$(cut -d' ' -f1 /proc/uptime)" \
       "\$(cat /sys/class/net/${NS_NAME}0/statistics/rx_bytes 2>/dev/null || echo 0)" \
-      "\$(cat /sys/class/net/${NS_NAME}0/statistics/rx_packets 2>/dev/null || echo 0)" >&3
-    sync
+      "\$(cat /sys/class/net/${NS_NAME}0/statistics/rx_packets 2>/dev/null || echo 0)" | durable
     sleep 1
   done ) &
 monitor=\$!

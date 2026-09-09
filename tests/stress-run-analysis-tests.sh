@@ -38,6 +38,25 @@ d="$(mk_run 20260101T020000Z-ccc-s8 1 8 900)"
 printf '2026-01-01T02:00:00Z\t0\tboot-7\tTrue\n' >> "$d/poll.tsv"
 : > "$d/telemetry.tsv"
 
+# --- run D: panicked but did NOT reboot within the window ----------------
+# With kdump enabled the crash kernel can spend minutes writing a dump, so the
+# node just stops reporting Ready and the boot ID never changes. Scoring this as
+# a survival would silently invert the result.
+d="$(mk_run 20260101T030000Z-ddd-s64 1 64 900)"
+printf '2026-01-01T03:00:00Z\t0\tboot-5\tTrue\n'  >> "$d/poll.tsv"
+printf '2026-01-01T03:00:10Z\t10\tboot-5\tTrue\n' >> "$d/poll.tsv"
+for t in 20 30 40 50; do printf '2026-01-01T03:00:%02dZ\t%s\tboot-5\tUnknown\n' "$t" "$t" >> "$d/poll.tsv"; done
+{ echo "# load_start_uptime=10.0"
+  echo -e "SAMPLE\t15.0\t$((7*2**30))\t70"
+  echo -e "SAMPLE\t25.0\t$((9*2**30))\t90"; } > "$d/telemetry.tsv"
+
+# --- run E: brief blip that RECOVERED must not count as a crash ----------
+d="$(mk_run 20260101T040000Z-eee-s64 1 64 900)"
+printf '2026-01-01T04:00:00Z\t0\tboot-6\tTrue\n'     >> "$d/poll.tsv"
+printf '2026-01-01T04:00:10Z\t10\tboot-6\tUnknown\n' >> "$d/poll.tsv"
+printf '2026-01-01T04:00:20Z\t20\tboot-6\tTrue\n'    >> "$d/poll.tsv"
+{ echo "# load_start_uptime=1.0"; echo -e "SAMPLE\t30.0\t$((50*2**30))\t500"; } > "$d/telemetry.tsv"
+
 out="$(python3 "${REPO_ROOT}/scripts/20-analyze-stress-runs.py" "${RUNS}")"
 printf '%s\n' "${out}" > "${TMPDIR}/out.txt"
 
@@ -72,4 +91,21 @@ grep -qE 'ccc-s8.*(void|NO TRAFFIC)' <<< "${out}" \
 grep -qi 'oc \|kubectl' "${REPO_ROOT}/scripts/20-analyze-stress-runs.py" \
   && { echo "FAIL: analyser must not call the cluster"; exit 1; }
 
-printf 'stress-run-analysis-tests: OK (3 fixtures)\n'
+# An unresponsive node that never recovers is a crash, reported as such.
+row_d="$(grep -E '^20260101T030000Z-ddd-s64' <<< "${out}")"
+grep -q 'unresponsive' <<< "${row_d}" \
+  || { echo "FAIL: never-recovering node must be classed unresponsive"; echo "${out}"; exit 1; }
+[[ "$(awk '{print $5}' <<< "${row_d}")" == "20" ]] \
+  || { echo "FAIL: crash time should be 20s"; echo "${row_d}"; exit 1; }
+# Bytes must be attributed as of the crash: 9 GiB, not a later sample.
+[[ "$(awk '{print $(NF-2)}' <<< "${row_d}")" == "9.0" ]] \
+  || { echo "FAIL: bytes-at-crash wrong"; echo "${row_d}"; exit 1; }
+
+# A blip that recovers is NOT a crash; calling it one would invent failures.
+row_e="$(grep -E '^20260101T040000Z-eee-s64' <<< "${out}")"
+[[ "$(awk '{print $5}' <<< "${row_e}")" == "-" ]] \
+  || { echo "FAIL: recovered blip must not count as a crash"; echo "${row_e}"; exit 1; }
+grep -qE 'eee-s64.*MEANINGFUL' <<< "${out}" \
+  || { echo "FAIL: recovered run should be a meaningful survivor"; echo "${out}"; exit 1; }
+
+printf 'stress-run-analysis-tests: OK (5 fixtures)\n'
