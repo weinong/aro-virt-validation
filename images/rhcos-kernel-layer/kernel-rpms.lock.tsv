@@ -7,23 +7,27 @@
 # before it enters the carrier image. RPM binaries are never committed; stage them
 # in KERNEL_RPM_DIR outside this repository.
 #
-# Current pin: INSTRUMENTED L1VH kernel `...mgns1.el10`, an UNSIGNED developer
-# build that adds logging around MSHV page donation to/from the hypervisor. It is
-# being used to test whether the csum_partial #GP (issues/2026-09-09b) lands on
-# memory that was donated to MSHV for a VM and then mishandled when returned to
-# the Linux kernel on teardown.
+# Current pin: FIXED + INSTRUMENTED L1VH kernel `...mgns2.el10`, an UNSIGNED
+# developer build. It keeps the mgns1 deposit/withdraw tracepoints AND adds the
+# candidate fix for the csum_partial #GP root cause
+# (issues/2026-09-09d-ROOT-CAUSE-deposited-page-overread.md):
+# hv_call_deposit_pages() now removes donated pages from the kernel direct map
+# (set_direct_map_valid_noflush + flush_tlb_kernel_range) before handing them to
+# the hypervisor, and restores them on the error and withdraw paths. An
+# over-read into a deposited page then hits a NOT PRESENT mapping and takes a
+# #PF, which load_unaligned_zeropad()'s EX_TYPE_ZEROPAD fixup recovers from,
+# instead of the unrecoverable #GP.
 #
-# Note the release suffix differs from the previous pin: `mgns1.el10` here versus
-# `el10_2` before, same 6.12.0-211.49.1.1794_2798046552 base. EXPECTED_KERNEL in
-# l1vh.env must match, or scripts/12b will report the swap as failed.
+# Previous pin was `mgns1.el10` (instrumentation only, no fix). EXPECTED_KERNEL
+# in l1vh.env must match this suffix or scripts/12b reports the swap as failed.
 #
 # RHCOS 10 installs all five of these subpackages, so all five are replaced
 # together. The tarball also ships kernel-devel, kernel-devel-matched,
 # kernel-modules-extra-matched, kernel-modules-internal and
 # kernel-modules-partner; those are NOT installed on RHCOS and are deliberately
 # left out of the carrier.
-kernel	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	b358a6b887102d1be5b2a09f85c4970deb69672749eeec6756afe04a263bfd5d
-kernel-core	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	d6bf320a34be7f596e1a11c05067cc57e8c53b5d3d9532be565c52caa8470c4b
-kernel-modules	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	52ad96322f8368e3a557f42bc66ca9ae5d3ee6d3f9c03799fe83f84f7a94eea9
-kernel-modules-core	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	8feadd411bbdd4a137207301ef941db62e96c479722cecf2033e863e9cbcca00
-kernel-modules-extra	0:6.12.0-211.49.1.1794_2798046552.mgns1.el10	x86_64	f1029e6c33b072a7b53bddfc6b233f0b5d3c0f99e8176017ceda4756f128415c
+kernel	0:6.12.0-211.49.1.1794_2798046552.mgns2.el10	x86_64	47bc7ab7631cd4d34e9536da543dc6897672629cf82dffa20f2dd449c7bf0381
+kernel-core	0:6.12.0-211.49.1.1794_2798046552.mgns2.el10	x86_64	fd4e0fbf64d401ef7a31cf1f407f3a9dce0103fdb4766711237a5857560e090a
+kernel-modules	0:6.12.0-211.49.1.1794_2798046552.mgns2.el10	x86_64	d4f6bb86aaec6b07d28fa23e2d59e0c92f5e13056f3e2799deb35389cbf5cbe7
+kernel-modules-core	0:6.12.0-211.49.1.1794_2798046552.mgns2.el10	x86_64	7ea8ed14163b589370efe9ee015a6980886be759652091a369778b4c7d956821
+kernel-modules-extra	0:6.12.0-211.49.1.1794_2798046552.mgns2.el10	x86_64	e7a6d689768aaeccd6ce9bcdef84885ba4104d8e859093f72bd2c896967c2e92

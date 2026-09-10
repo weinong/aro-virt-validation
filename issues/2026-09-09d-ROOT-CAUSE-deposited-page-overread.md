@@ -1,5 +1,11 @@
 # 2026-09-09 — ROOT CAUSE: csum_partial over-reads into a page deposited to the hypervisor
 
+> **FIX VERIFIED 2026-09-10.** The `mgns2` kernel implements option 1 below
+> (deposited pages are removed from the kernel direct map, so the over-read takes
+> a recoverable `#PF` instead of an unrecoverable `#GP`). The reproducer that
+> panicked this node in ~4 seconds now absorbs 18.3 TiB without a fault.
+> See [`2026-09-10-mgns2-fix-verified.md`](2026-09-10-mgns2-fix-verified.md).
+
 > **The `#GP` is a benign 8-byte over-read crossing a 4 KiB page boundary into a
 > page that Linux has deposited to the Hyper-V hypervisor via
 > `HVCALL_DEPOSIT_MEMORY` and which the hypervisor still owns.**
