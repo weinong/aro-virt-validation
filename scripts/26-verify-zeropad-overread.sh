@@ -14,12 +14,14 @@
 #
 # Usage:
 #   ./scripts/26-verify-zeropad-overread.sh insn   <vmcore-dmesg.txt>
-#   ./scripts/26-verify-zeropad-overread.sh extable <kernel-devel...rpm>
+#   ./scripts/26-verify-zeropad-overread.sh extable <kernel-devel.rpm | word-at-a-time.h>
 #   ./scripts/26-verify-zeropad-overread.sh ptes   <vtop.txt> [fault-addr]
 #   ./scripts/26-verify-zeropad-overread.sh all    <dumpdir> <kernel-devel rpm>
 #
 # `dumpdir` is a kdump directory from scripts/16-mshv-kdump.sh collect, i.e. one
 # containing vmcore-dmesg.txt and (for `ptes`) vtop.txt.
+#
+# `all` accepts an RPM or a header for its second argument.
 # =============================================================================
 set -euo pipefail
 
@@ -67,18 +69,26 @@ EOF
 }
 
 # Show that the faulting load is annotated with an exception-table fixup.
+# Accepts either a kernel-devel RPM or an already-extracted word-at-a-time.h,
+# so an evidence bundle can ship the 2 KB header instead of a 19 MB RPM.
 cmd_extable() {
-  local rpm="${1:?need a kernel-devel .rpm matching the crashing kernel}"
-  check_command rpm2cpio || exit 1
-  check_command cpio || exit 1
-  local tmp; tmp="$(mktemp -d)"
-  trap 'rm -rf "${tmp}"' RETURN
+  local src="${1:?need a kernel-devel .rpm or an asm/word-at-a-time.h}"
+  local tmp hdr
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
 
-  log_info "extracting asm/word-at-a-time.h from $(basename "${rpm}")"
-  ( cd "${tmp}" && rpm2cpio "${rpm}" 2>/dev/null | cpio -id --quiet 2>/dev/null ) || true
-  local hdr
-  hdr="$(find "${tmp}" -path '*asm/word-at-a-time.h' | head -1)"
-  [[ -n "${hdr}" ]] || { log_error "word-at-a-time.h not found in RPM"; return 1; }
+  if [[ "${src}" == *.rpm ]]; then
+    check_command rpm2cpio || exit 1
+    check_command cpio || exit 1
+    log_info "extracting asm/word-at-a-time.h from $(basename "${src}")"
+    ( cd "${tmp}" && rpm2cpio "${src}" 2>/dev/null | cpio -id --quiet 2>/dev/null ) || true
+    hdr="$(find "${tmp}" -path '*asm/word-at-a-time.h' | head -1)"
+  else
+    log_info "reading ${src}"
+    hdr="${src}"
+  fi
+  [[ -n "${hdr}" && -f "${hdr}" ]] || { log_error "word-at-a-time.h not found"; return 1; }
 
   sed -n '/static inline unsigned long load_unaligned_zeropad/,/^}/p' "${hdr}" | sed 's/^/  /'
   echo
