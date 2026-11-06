@@ -169,7 +169,7 @@ TEST_SUITES=compute,network,storage STORAGE_CLASS=managed-csi make validation-ch
 DRY_RUN=true make validation-checkup
 ```
 
-Diagnostic QEMU `10.1.0-17.el9_8.3` validation:
+### (Optional) Diagnostic QEMU `10.1.0-17.el9_8.3` validation:
 
 Download the eight signed x86_64 RPMs listed in
 `images/cnv-qemu-launcher/qemu-rpms.lock.tsv` from Red Hat advisory
@@ -218,7 +218,7 @@ file and run the explicit restore after resolving any reported drift.
 
 Artifacts are saved under `.checkup-runs/<timestamp>/`.
 
-## Day-2 RHCOS Custom Kernel Layering (mshv pool)
+## (Optional) Day-2 RHCOS Custom Kernel Layering (mshv pool)
 
 Apply a custom kernel to the RHCOS 10 MSHV/CNV nodes as a day-2
 [image mode / RHCOS layer](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/machine_configuration/mco-coreos-layering)
@@ -253,7 +253,7 @@ EXPECTED_KERNEL=6.12.0-55.el10 make verify-kernel-layer
 make revert-kernel-layer                       # roll back to the base image
 ```
 
-## Disable Kernel ASLR (mshv pool)
+## (Optional) Disable Kernel ASLR (mshv pool)
 
 For diagnostic work only, disable KASLR on the existing `mshv` pool:
 
