@@ -18,6 +18,7 @@ set -euo pipefail
 
 case "$*" in
   "whoami") printf 'system:admin\n' ;;
+  "get clusterversion version -o jsonpath={.status.desired.version}") printf '4.22.4' ;;
   "get featuregate/cluster -o jsonpath={.spec.featureSet}") printf 'TechPreviewNoUpgrade' ;;
   "get clusterversion version -o jsonpath={.status.conditions[?(@.type==\"Progressing\")].status}") printf 'False' ;;
   "get clusterversion version -o jsonpath={.status.conditions[?(@.type==\"Failing\")].status}") printf 'False' ;;

@@ -14,7 +14,7 @@ QUAY_PULLSECRET ?= .quay-pullsecret
 SELF_MANAGED_CLUSTER ?=
 SELF_MANAGED_BASE_DOMAIN ?=
 SELF_MANAGED_BASE_DOMAIN_RESOURCE_GROUP ?=
-RELEASE_IMAGE   ?= quay.io/openshift-release-dev/ocp-release@sha256:1a50a7c21acc0b113aa74c187bec8798cb58481c065a4c5a0e25df6bc46b8815
+RELEASE_IMAGE   ?= quay.io/openshift-release-dev/ocp-release@sha256:a43b861d912fad275f7c1c76cae38c2b5a33f4f1245807b376fe59707d3ef98a
 SSH_PUB_KEY     ?= $(HOME)/.ssh/id_rsa.pub
 TOOLS_DIR       ?= ocp-tools
 CNV_VERSION     ?= 4.99
@@ -565,11 +565,12 @@ aro-validation-flow: ## Run the full ARO validation flow sequentially
 
 ocp-validation-flow: ## Run the full self-managed OCP validation flow sequentially
 	@$(MAKE) ocp-up
-	@$(MAKE) cluster-info
-	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" $(MAKE) techpreview
+	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" $(MAKE) cluster-info
 	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" $(MAKE) mshv-node
-	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" $(MAKE) cnv-pull-secret
-	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" $(MAKE) cnv-install
+	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" oc apply -f manifests/cnv/operator.yaml
+	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" oc wait -n openshift-cnv --for=jsonpath='{.status.state}'=AtLatestKnown subscription/hco-operatorhub --timeout=600s
+	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" oc wait --for=condition=Established crd/hyperconvergeds.hco.kubevirt.io --timeout=60s
+	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" oc apply -f manifests/cnv/hyperconverged-mshv.yaml
 	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" $(MAKE) mshv-hco-patch
 	@KUBECONFIG="$(PWD)/installer/auth/kubeconfig" $(MAKE) validation-checkup
 

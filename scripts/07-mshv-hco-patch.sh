@@ -54,11 +54,17 @@ JSONPATCH='[
   }
 ]'
 
-log_info "Applying kubevirt jsonpatch annotation to HCO..."
-oc annotate hco "${HCO_NAME}" -n openshift-cnv --overwrite \
-  "kubevirt.kubevirt.io/jsonpatch=${JSONPATCH}"
+# HCO 5 manages these settings through its native hypervisor API.
+CLUSTER_VERSION="$(oc get clusterversion version -o jsonpath='{.status.desired.version}')"
+if [[ "${CLUSTER_VERSION}" != 5.0.* ]]; then
+  log_info "Applying kubevirt jsonpatch annotation to HCO..."
+  oc annotate hco "${HCO_NAME}" -n openshift-cnv --overwrite \
+    "kubevirt.kubevirt.io/jsonpatch=${JSONPATCH}"
 
-log_ok "HCO annotated."
+  log_ok "HCO annotated."
+else
+  oc wait -n openshift-cnv hco/"${HCO_NAME}" --for=condition=Available --timeout=900s
+fi
 
 # NOTE: We intentionally do NOT restrict virt workload placement to the mshv role
 # via spec.deployment.nodePlacements. Under the hyperv-direct hypervisor every
@@ -71,7 +77,7 @@ log_ok "HCO annotated."
 # "Ran 0 of N specs". See issues/2026-08-31c-checkup-node-schedulable.md.
 # If a previous run pinned workloads to mshv, clear it so virt-handler runs on
 # all workers.
-if oc get hco "${HCO_NAME}" -n openshift-cnv -o jsonpath='{.spec.deployment.nodePlacements.workload}' 2>/dev/null | grep -q 'mshv'; then
+if [[ "${CLUSTER_VERSION}" != 5.0.* ]] && oc get hco "${HCO_NAME}" -n openshift-cnv -o jsonpath='{.spec.deployment.nodePlacements.workload}' 2>/dev/null | grep -q 'mshv'; then
   log_info "Clearing legacy mshv-only workload nodePlacement so virt-handler runs on all workers..."
   oc patch hco "${HCO_NAME}" -n openshift-cnv --type=json \
     -p '[{"op":"remove","path":"/spec/deployment/nodePlacements/workload"}]' 2>/dev/null || true

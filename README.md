@@ -88,19 +88,26 @@ make ocp-up
 make cluster-info
 ```
 
-`make ocp-up` defaults to stable OCP `4.22.7`, pinned by release image digest.
+`make ocp-up` defaults to stable OCP `5.0.1`, pinned by release image digest.
 
-Run validation phases manually:
+OCP 5 uses RHCOS 10 by default. Install stable CNV 5.0 and select
+`hyperv-direct` through the native HCO API:
 
 ```sh
 export KUBECONFIG=$PWD/installer/auth/kubeconfig
-make techpreview
 make mshv-node
-make cnv-pull-secret
-CNV_VERSION=4.99 make cnv-install
+oc apply -f manifests/cnv/operator.yaml
+oc wait -n openshift-cnv --for=jsonpath='{.status.state}'=AtLatestKnown subscription/hco-operatorhub --timeout=600s
+oc wait --for=condition=Established crd/hyperconvergeds.hco.kubevirt.io --timeout=60s
+oc apply -f manifests/cnv/hyperconverged-mshv.yaml
 make mshv-hco-patch
 make validation-checkup
 ```
+
+The operator manifest requests CNV 5.0.0 as the initial CSV and enables
+automatic installation and upgrades on the stable channel. It does not
+enforce a 5.0 version ceiling. Wait for the HCO CRD before applying the
+separate HyperConverged manifest.
 
 Common overrides:
 

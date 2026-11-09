@@ -18,6 +18,7 @@ set -euo pipefail
 
 case "$*" in
   "whoami") exit 0 ;;
+  "get clusterversion version -o jsonpath={.status.desired.version}") printf '%s' "${TEST_VERSION:-4.22.4}" ;;
   "get hco -n openshift-cnv -o jsonpath={.items[0].metadata.name}") printf 'kubevirt-hyperconverged' ;;
   "annotate hco kubevirt-hyperconverged -n openshift-cnv --overwrite "*) exit 0 ;;
   "get hco kubevirt-hyperconverged -n openshift-cnv -o jsonpath={.spec.deployment.nodePlacements.workload}")

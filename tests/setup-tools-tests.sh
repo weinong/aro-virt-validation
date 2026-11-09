@@ -99,7 +99,7 @@ rm "${TMPDIR}/.pullsecret"
 PATH="${TMPDIR}/bin:${PATH}" FAIL_AZ=true run_setup_tools setup-tools
 
 PATH="${TMPDIR}/bin:${PATH}" \
-  EXPECTED_FROM=quay.io/openshift-release-dev/ocp-release@sha256:1a50a7c21acc0b113aa74c187bec8798cb58481c065a4c5a0e25df6bc46b8815 \
+  EXPECTED_FROM=quay.io/openshift-release-dev/ocp-release@sha256:a43b861d912fad275f7c1c76cae38c2b5a33f4f1245807b376fe59707d3ef98a \
   make -j4 -C "${TMPDIR}" setup-tools \
     TOOLS_DIR="${TMPDIR}/default-tools" \
     REGISTRY=test-registry \

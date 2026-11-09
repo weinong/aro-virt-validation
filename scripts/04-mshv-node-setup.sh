@@ -33,13 +33,18 @@ log_info "Verifying cluster login..."
 CURRENT_USER="$(oc whoami 2>/dev/null)" || { log_error "Not logged in."; exit 1; }
 log_ok "Logged in as ${CURRENT_USER}"
 
-log_info "Verifying TechPreviewNoUpgrade is enabled..."
-FEATURE_SET="$(oc get featuregate/cluster -o jsonpath='{.spec.featureSet}' 2>/dev/null || echo '')"
-if [[ "${FEATURE_SET}" != "TechPreviewNoUpgrade" ]]; then
-  log_error "TechPreviewNoUpgrade is not enabled. Run scripts/03-techpreview-setup.sh first."
-  exit 1
+# OCP 5 uses RHCOS 10 by default; preserve the existing prerequisites for
+# older clusters, including the ARO flow.
+CLUSTER_VERSION="$(oc get clusterversion version -o jsonpath='{.status.desired.version}')"
+if [[ "${CLUSTER_VERSION}" != 5.0.* ]]; then
+  log_info "Verifying TechPreviewNoUpgrade is enabled..."
+  FEATURE_SET="$(oc get featuregate/cluster -o jsonpath='{.spec.featureSet}' 2>/dev/null || echo '')"
+  if [[ "${FEATURE_SET}" != "TechPreviewNoUpgrade" ]]; then
+    log_error "TechPreviewNoUpgrade is not enabled. Run scripts/03-techpreview-setup.sh first."
+    exit 1
+  fi
+  log_ok "TechPreviewNoUpgrade is enabled."
 fi
-log_ok "TechPreviewNoUpgrade is enabled."
 
 log_info "Verifying cluster health before changing ARO reconciliation..."
 PROGRESSING="$(oc get clusterversion version -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null || echo '')"
